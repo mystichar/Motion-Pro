@@ -1,0 +1,4 @@
+[submodule "third_party/anemoia-esp32"]
+	path = third_party/anemoia-esp32
+	url = https://github.com/mystichar/Anemoia-ESP32.git
+	branch = motion-pro

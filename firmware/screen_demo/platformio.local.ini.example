@@ -1,0 +1,4 @@
+; Serial monitor port — run find-port.ps1 to discover yours, then uncomment below.
+
+[env:esp32s3]
+; monitor_port = COM3

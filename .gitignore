@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# PlatformIO
+.pio/
+platformio.local.ini
+
+*.nes
+
+# Junction created by firmware/anemoia/build-and-upload.ps1
+firmware/anemoia/Anemoia-ESP32/
