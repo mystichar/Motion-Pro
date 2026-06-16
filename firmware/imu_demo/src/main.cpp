@@ -1,0 +1,262 @@
+#include <Arduino.h>
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <SparkFun_ISM330DHCX.h>
+
+#include "display_pins.h"
+#include "imu_pins.h"
+
+namespace {
+
+constexpr uint32_t kRefreshMs = 50;
+constexpr uint16_t kHeaderColor = 0x0010;
+constexpr uint16_t kGridColor = 0x4208;
+
+constexpr int kGraphX = 4;
+constexpr int kGraphY = 108;
+constexpr int kGraphW = 232;
+constexpr int kGraphH = 118;
+constexpr float kGyroScale = 80000.0f;  // ±80 dps (milli-dps units)
+
+Adafruit_ST7789 tft(LCD_CS, LCD_DC, LCD_RST);
+SparkFun_ISM330DHCX imu;
+
+sfe_ism_data_t accel{};
+sfe_ism_data_t gyro{};
+
+float gyroXHist[kGraphW]{};
+float gyroYHist[kGraphW]{};
+float gyroZHist[kGraphW]{};
+int graphHead = 0;
+int graphSampleCount = 0;
+
+// Off-screen buffer for smooth left-scrolling graph (interior only; border stays on TFT).
+constexpr int kCanvasW = kGraphW - 2;
+constexpr int kCanvasH = kGraphH - 2;
+GFXcanvas16 graphCanvas(kCanvasW, kCanvasH);
+
+bool imuOk = false;
+
+void setupBacklight() {
+#if LCD_BL_USE_PWM
+#if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+  ledcAttach(LCD_BL, 5000, 8);
+  ledcWrite(LCD_BL, 204);
+#else
+  ledcSetup(0, 5000, 8);
+  ledcAttachPin(LCD_BL, 0);
+  ledcWrite(0, 204);
+#endif
+#else
+  pinMode(LCD_BL, OUTPUT);
+  digitalWrite(LCD_BL, HIGH);
+#endif
+}
+
+void drawStaticChrome() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.fillRect(0, 0, LCD_WIDTH, 24, kHeaderColor);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(4, 8);
+  tft.print(F("ISM330DHCX"));
+
+  tft.setTextColor(ST77XX_CYAN);
+  tft.setCursor(4, 30);
+  tft.println(F("Accel (milli-g)"));
+
+  tft.setTextColor(ST77XX_CYAN);
+  tft.setCursor(4, 88);
+  tft.print(F("Gyro (milli-dps)  "));
+  tft.setTextColor(ST77XX_RED);
+  tft.print('X');
+  tft.setTextColor(ST77XX_GREEN);
+  tft.print('Y');
+  tft.setTextColor(ST77XX_BLUE);
+  tft.print('Z');
+
+  tft.drawRect(kGraphX, kGraphY, kGraphW, kGraphH, kGridColor);
+  const int midY = kGraphY + kGraphH / 2;
+  tft.drawFastHLine(kGraphX + 1, midY, kGraphW - 2, kGridColor);
+
+  tft.setTextColor(kGridColor);
+  tft.setCursor(4, 232);
+  tft.print(F("SDA GPIO"));
+  tft.print(IMU_SDA);
+  tft.print(F("  SCL GPIO"));
+  tft.println(IMU_SCL);
+}
+
+void drawValueBlock(int y, char axis, float value) {
+  tft.fillRect(40, y, LCD_WIDTH - 44, 14, ST77XX_BLACK);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setCursor(4, y);
+  tft.print(axis);
+  tft.print(F(": "));
+  tft.setTextColor(ST77XX_WHITE);
+  tft.print(value, 1);
+}
+
+void drawErrorScreen() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextColor(ST77XX_RED);
+  tft.setTextSize(2);
+  tft.setCursor(12, 100);
+  tft.println(F("IMU ERROR"));
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(4, 140);
+  tft.println(F("Check Qwiic wiring:"));
+  tft.setCursor(4, 156);
+  tft.print(F("Blue  -> GPIO"));
+  tft.println(IMU_SDA);
+  tft.setCursor(4, 172);
+  tft.print(F("Yellow-> GPIO"));
+  tft.println(IMU_SCL);
+  tft.setCursor(4, 196);
+  tft.println(F("Red=3.3V Black=GND"));
+}
+
+bool initImu() {
+  Wire.begin(IMU_SDA, IMU_SCL);
+  Wire.setClock(400000);
+
+  if (!imu.begin()) {
+    return false;
+  }
+
+  imu.deviceReset();
+  while (!imu.getDeviceReset()) {
+    delay(1);
+  }
+
+  imu.setDeviceConfig();
+  imu.setBlockDataUpdate();
+  imu.setAccelDataRate(ISM_XL_ODR_104Hz);
+  imu.setAccelFullScale(ISM_4g);
+  imu.setGyroDataRate(ISM_GY_ODR_104Hz);
+  imu.setGyroFullScale(ISM_500dps);
+  return true;
+}
+
+void readImu() {
+  imu.getAccel(&accel);
+  imu.getGyro(&gyro);
+}
+
+void pushGyroSample() {
+  gyroXHist[graphHead] = gyro.xData;
+  gyroYHist[graphHead] = gyro.yData;
+  gyroZHist[graphHead] = gyro.zData;
+  graphHead = (graphHead + 1) % kGraphW;
+  if (graphSampleCount < kGraphW) {
+    ++graphSampleCount;
+  }
+}
+
+int gyroToCanvasY(float value) {
+  const int midY = kCanvasH / 2;
+  const float clipped = constrain(value, -kGyroScale, kGyroScale);
+  return midY - (int)((clipped / kGyroScale) * (midY - 2));
+}
+
+void scrollGraphCanvasLeft() {
+  uint16_t* buf = graphCanvas.getBuffer();
+  for (int y = 0; y < kCanvasH; ++y) {
+    uint16_t* row = buf + y * kCanvasW;
+    memmove(row, row + 1, (kCanvasW - 1) * sizeof(uint16_t));
+    row[kCanvasW - 1] = ST77XX_BLACK;
+  }
+}
+
+void drawGyroGraph() {
+  scrollGraphCanvasLeft();
+
+  const int midY = kCanvasH / 2;
+  graphCanvas.drawFastHLine(0, midY, kCanvasW, kGridColor);
+
+  const int idxNew = (graphHead + kGraphW - 1) % kGraphW;
+  const int xNew = kCanvasW - 1;
+
+  if (graphSampleCount >= 2) {
+    const int idxPrev = (graphHead + kGraphW - 2) % kGraphW;
+    const int xPrev = kCanvasW - 2;
+    graphCanvas.drawLine(xPrev, gyroToCanvasY(gyroXHist[idxPrev]), xNew,
+                         gyroToCanvasY(gyroXHist[idxNew]), ST77XX_RED);
+    graphCanvas.drawLine(xPrev, gyroToCanvasY(gyroYHist[idxPrev]), xNew,
+                         gyroToCanvasY(gyroYHist[idxNew]), ST77XX_GREEN);
+    graphCanvas.drawLine(xPrev, gyroToCanvasY(gyroZHist[idxPrev]), xNew,
+                         gyroToCanvasY(gyroZHist[idxNew]), ST77XX_BLUE);
+  } else {
+    graphCanvas.drawPixel(xNew, gyroToCanvasY(gyroXHist[idxNew]), ST77XX_RED);
+    graphCanvas.drawPixel(xNew, gyroToCanvasY(gyroYHist[idxNew]), ST77XX_GREEN);
+    graphCanvas.drawPixel(xNew, gyroToCanvasY(gyroZHist[idxNew]), ST77XX_BLUE);
+  }
+
+  tft.drawRGBBitmap(kGraphX + 1, kGraphY + 1, graphCanvas.getBuffer(), kCanvasW, kCanvasH);
+}
+
+void drawCurrentGyro() {
+  tft.fillRect(4, 248, LCD_WIDTH - 8, 10, ST77XX_BLACK);
+  tft.setTextSize(1);
+  tft.setCursor(4, 248);
+  tft.setTextColor(ST77XX_RED);
+  tft.print(gyro.xData, 0);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.print(F("  "));
+  tft.setTextColor(ST77XX_GREEN);
+  tft.print(gyro.yData, 0);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.print(F("  "));
+  tft.setTextColor(ST77XX_BLUE);
+  tft.print(gyro.zData, 0);
+}
+
+void drawReadings() {
+  drawValueBlock(44, 'X', accel.xData);
+  drawValueBlock(58, 'Y', accel.yData);
+  drawValueBlock(72, 'Z', accel.zData);
+  drawCurrentGyro();
+}
+
+}  // namespace
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  setupBacklight();
+  SPI.begin(LCD_SCK, -1, LCD_MOSI, LCD_CS);
+  tft.init(LCD_WIDTH, LCD_HEIGHT, SPI_MODE0);
+  tft.setSPISpeed(LCD_SPI_HZ);
+  tft.setRotation(0);
+
+  imuOk = initImu();
+  if (imuOk) {
+    drawStaticChrome();
+    graphCanvas.fillScreen(ST77XX_BLACK);
+    Serial.println(F("IMU OK — gyro graph in milli-dps"));
+  } else {
+    drawErrorScreen();
+    Serial.println(F("IMU begin() failed — check wiring"));
+  }
+}
+
+void loop() {
+  if (!imuOk) {
+    delay(1000);
+    return;
+  }
+
+  readImu();
+  pushGyroSample();
+  drawGyroGraph();
+  drawReadings();
+
+  Serial.printf("A  X:%8.1f  Y:%8.1f  Z:%8.1f  |  G  X:%8.1f  Y:%8.1f  Z:%8.1f\n",
+                accel.xData, accel.yData, accel.zData, gyro.xData, gyro.yData, gyro.zData);
+
+  delay(kRefreshMs);
+}

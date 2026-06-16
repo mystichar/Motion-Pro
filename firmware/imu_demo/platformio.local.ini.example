@@ -1,0 +1,4 @@
+; Copy to platformio.local.ini and set your COM port.
+[env:esp32s3]
+upload_port = COM3
+monitor_port = COM3
