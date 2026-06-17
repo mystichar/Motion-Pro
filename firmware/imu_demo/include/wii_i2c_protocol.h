@@ -39,6 +39,10 @@ const char* idLabelFor(const uint8_t* id6);
 
 void getLastWrite(uint8_t* out, uint8_t& len);
 void getLastRead(uint8_t* out, uint8_t& len);
+uint32_t lastActivityMs();
+void logStatusSerial();
+
+constexpr uint8_t kMaxRawBytes = 32;
 
 void decodeLastWrite(const uint8_t* data, uint8_t len, DecodeInfo& info);
 void decodeLiveReport(const uint8_t* b, DecodeInfo& info);

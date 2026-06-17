@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <string.h>
 
+#include "wii_pins.h"
+
 namespace wii_i2c {
 
 namespace {
@@ -13,10 +15,13 @@ RegBank gBank = RegBank::A60000;
 uint16_t gReadPtr = kRegLiveDataOff;
 volatile uint32_t gWriteCount = 0;
 volatile uint32_t gReadCount = 0;
-uint8_t gLastWrite[16]{};
+volatile uint32_t gLastActivityMs = 0;
+uint8_t gLastWrite[kMaxRawBytes]{};
 uint8_t gLastWriteLen = 0;
-uint8_t gLastRead[kLiveReportLen]{};
+uint8_t gLastRead[kMaxRawBytes]{};
 uint8_t gLastReadLen = 0;
+uint8_t gLastWriteReported = 0;
+uint8_t gLastReadReported = 0;
 
 uint8_t* bankRegs(RegBank bank) {
   return bank == RegBank::A60000 ? gRegA6 : gRegA4;
@@ -62,21 +67,16 @@ void handleRegisterWrite(RegBank bank, uint16_t offset, const uint8_t* data, uin
   }
 }
 
+// Wii extension transactions to 0x52 use a single-byte register offset within the
+// 0x100-byte block (e.g. 0xA400F0 -> 0xF0 on the wire). The first payload byte is
+// the offset; any remaining bytes are the value(s) written.
 uint16_t parseOffset(const uint8_t* data, uint8_t len, uint8_t& data_start) {
-  if (len == 1) {
-    data_start = 1;
-    return data[0];
+  if (len == 0) {
+    data_start = 0;
+    return 0;
   }
-  if (len >= 2 && data[0] == 0x00) {
-    data_start = (len > 2) ? 2 : 2;
-    return data[1];
-  }
-  if (len >= 2) {
-    data_start = 2;
-    return ((uint16_t)data[0] << 8) | data[1];
-  }
-  data_start = len;
-  return 0;
+  data_start = 1;
+  return data[0];
 }
 
 }  // namespace
@@ -131,7 +131,6 @@ void decodeLastWrite(const uint8_t* data, uint8_t len, DecodeInfo& info) {
 
   if (payload_len == 0 && len <= 2) {
     snprintf(info.op, sizeof(info.op), "read ptr %02X", (unsigned)offset);
-    gReadPtr = offset;
     return;
   }
 
@@ -167,6 +166,8 @@ void decodeLastWrite(const uint8_t* data, uint8_t len, DecodeInfo& info) {
 
 void onMasterWrite(const uint8_t* data, uint8_t len) {
   gWriteCount++;
+  gLastActivityMs = millis();
+  gLastWriteReported = len;
   gLastWriteLen = len > sizeof(gLastWrite) ? sizeof(gLastWrite) : len;
   memcpy(gLastWrite, data, gLastWriteLen);
 
@@ -189,6 +190,7 @@ void onMasterWrite(const uint8_t* data, uint8_t len) {
 
 void onMasterReadRequest(uint8_t* out, uint8_t max_len, uint8_t& out_len) {
   gReadCount++;
+  gLastActivityMs = millis();
   uint8_t* regs = bankRegs(gBank);
   out_len = 0;
   while (out_len < max_len && out_len < kLiveReportLen && (gReadPtr + out_len) < kRegBlockSize) {
@@ -199,8 +201,24 @@ void onMasterReadRequest(uint8_t* out, uint8_t max_len, uint8_t& out_len) {
     out_len = kLiveReportLen;
   }
   gLastReadLen = out_len > sizeof(gLastRead) ? sizeof(gLastRead) : out_len;
+  gLastReadReported = out_len;
   memcpy(gLastRead, out, gLastReadLen);
   gReadPtr += out_len;
+}
+
+void logStatusSerial() {
+  const bool senseHigh = digitalRead(WII_SENSE) == HIGH;
+  const bool sdaHigh = digitalRead(WII_SDA) == HIGH;
+  const bool sclHigh = digitalRead(WII_SCL) == HIGH;
+  Serial.printf("I2C status: sda=%d scl=%d sense=%s bank=%s ptr=%02X W=%lu R=%lu last=%lums ago\n",
+                sdaHigh ? 1 : 0, sclHigh ? 1 : 0, senseHigh ? "HI" : "LO",
+                gBank == RegBank::A60000 ? "A60000" : "A40000", (unsigned)gReadPtr,
+                (unsigned long)gWriteCount, (unsigned long)gReadCount,
+                gLastActivityMs == 0 ? 0UL : (unsigned long)(millis() - gLastActivityMs));
+}
+
+uint32_t lastActivityMs() {
+  return gLastActivityMs;
 }
 
 void getCounts(uint32_t& writes, uint32_t& reads) {

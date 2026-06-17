@@ -419,6 +419,7 @@ void loop() {
     delay(kPrismRefreshMs);
   } else {
     wii_i2c::refresh(tft);
+    wii_i2c::logPeriodicSerial();
     delay(kRefreshMs);
   }
 }

@@ -14,6 +14,8 @@
       "physical_interface": "I2C",
       "i2c_speed_hz": 400000,
       "slave_address_7bit": "0x52",
+      "esp32_slave_address_7bit": "0x58",
+      "esp32_slave_address_note": "Canonical Wii extension is 0x52. Motion Pro ESP32-S3 prototype scan found live traffic only when Wire slave listens at 0x58 (2026-06-17).",
       "logic_level_v": 3.3,
       "master": "Wiimote",
       "slave": "Extension controller",
