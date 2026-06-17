@@ -1,0 +1,817 @@
+{
+    "schema_name": "wiimote_extension_i2c_reference",
+    "schema_version": "0.1.0",
+    "notes": [
+      "Wiimote is the I2C master. Extension/accessory is the I2C slave.",
+      "Normal extension slave address is 0x52, 7-bit.",
+      "Normal extensions expose a 0x100-byte virtual register block mapped at 0xA40000.",
+      "Wii MotionPlus starts at 0xA60000 before activation, then can appear at 0xA40000 after activation.",
+      "Most button bits are active-low: 0 means pressed, 1 means released.",
+      "Layouts below describe decrypted/unencoded bytes. If using the new init sequence, extension type bytes and report data are normally unencrypted.",
+      "Byte numbering is zero-based within the extension data payload read from the live-data register."
+    ],
+    "bus": {
+      "physical_interface": "I2C",
+      "i2c_speed_hz": 400000,
+      "slave_address_7bit": "0x52",
+      "logic_level_v": 3.3,
+      "master": "Wiimote",
+      "slave": "Extension controller",
+      "normal_extension_register_base": "0xA40000",
+      "motion_plus_register_base_before_activation": "0xA60000",
+      "virtual_register_block_size_bytes": 256,
+      "live_data_offset": "0x08",
+      "live_data_address_normal_extension": "0xA40008",
+      "id_address_normal_extension": "0xA400FA",
+      "id_length_bytes": 6,
+      "format_register": "0xA400FE"
+    },
+    "initialization": {
+      "normal_extension_new_method": [
+        {
+          "operation": "write",
+          "address": "0xA400F0",
+          "data": ["0x55"],
+          "meaning": "initialize / disable encryption path"
+        },
+        {
+          "operation": "write",
+          "address": "0xA400FB",
+          "data": ["0x00"],
+          "meaning": "complete new initialization method"
+        },
+        {
+          "operation": "read",
+          "address": "0xA400FA",
+          "length": 6,
+          "meaning": "read extension ID"
+        }
+      ],
+      "normal_extension_old_method": [
+        {
+          "operation": "write",
+          "address": "0xA40040",
+          "data": ["0x00"],
+          "meaning": "old encryption-byte initialization, less compatible"
+        }
+      ],
+      "motion_plus_initialization": [
+        {
+          "operation": "write",
+          "address": "0xA600F0",
+          "data": ["0x55"],
+          "meaning": "initialize MotionPlus at its pre-activation register space"
+        },
+        {
+          "operation": "read",
+          "address": "0xA600FA",
+          "length": 6,
+          "meaning": "read inactive MotionPlus ID"
+        }
+      ],
+      "motion_plus_activation_modes": {
+        "motion_plus_only": {
+          "operation": "write",
+          "address": "0xA600FE",
+          "data": ["0x04"],
+          "resulting_standard_id_at_0xA400FA": ["0x00", "0x00", "0xA4", "0x20", "0x04", "0x05"],
+          "meaning": "activate MotionPlus as the active extension"
+        },
+        "motion_plus_plus_nunchuk_passthrough": {
+          "operation": "write",
+          "address": "0xA600FE",
+          "data": ["0x05"],
+          "resulting_standard_id_at_0xA400FA": ["0x00", "0x00", "0xA4", "0x20", "0x05", "0x05"],
+          "meaning": "activate MotionPlus with Nunchuk passthrough interleaving"
+        },
+        "motion_plus_plus_classic_passthrough": {
+          "operation": "write",
+          "address": "0xA600FE",
+          "data": ["0x07"],
+          "resulting_standard_id_at_0xA400FA": ["0x00", "0x00", "0xA4", "0x20", "0x07", "0x05"],
+          "meaning": "activate MotionPlus with Classic Controller passthrough interleaving"
+        },
+        "deactivate_motion_plus_return_to_passthrough_extension": {
+          "operation": "write",
+          "address": "0xA400F0",
+          "data": ["0x55"],
+          "meaning": "deactivate MotionPlus and expose extension plugged into MotionPlus passthrough port"
+        }
+      }
+    },
+    "extension_ids": {
+      "nunchuk": {
+        "id_bytes": ["0x00", "0x00", "0xA4", "0x20", "0x00", "0x00"],
+        "id_address": "0xA400FA"
+      },
+      "classic_controller": {
+        "id_bytes": ["0x00", "0x00", "0xA4", "0x20", "0x01", "0x01"],
+        "id_address": "0xA400FA"
+      },
+      "classic_controller_pro": {
+        "id_bytes": ["0x01", "0x00", "0xA4", "0x20", "0x01", "0x01"],
+        "id_address": "0xA400FA"
+      },
+      "wii_motion_plus_inactive_at_standard_block": {
+        "id_bytes": ["0x00", "0x00", "0xA4", "0x20", "0x00", "0x05"],
+        "id_address": "0xA400FA"
+      },
+      "wii_motion_plus_inactive_at_motionplus_block": {
+        "id_bytes": ["0x00", "0x00", "0xA6", "0x20", "0x00", "0x05"],
+        "id_address": "0xA600FA"
+      },
+      "wii_motion_plus_active": {
+        "id_bytes": ["0x00", "0x00", "0xA4", "0x20", "0x04", "0x05"],
+        "id_address": "0xA400FA"
+      },
+      "wii_motion_plus_nunchuk_passthrough": {
+        "id_bytes": ["0x00", "0x00", "0xA4", "0x20", "0x05", "0x05"],
+        "id_address": "0xA400FA"
+      },
+      "wii_motion_plus_classic_passthrough": {
+        "id_bytes": ["0x00", "0x00", "0xA4", "0x20", "0x07", "0x05"],
+        "id_address": "0xA400FA"
+      }
+    },
+    "encryption": {
+      "new_init_disables_encryption": true,
+      "encrypted_mode_formula": "decrypted_byte = ((encrypted_byte ^ table1[address % 8]) + table2[address % 8]) & 0xFF",
+      "zero_key_table_note": "If the host key is 16 zero bytes, table1[x] and table2[x] are all 0x97 according to WiiBrew.",
+      "recommendation": "Use the new init method unless deliberately testing old-mode compatibility."
+    },
+    "extensions": {
+      "nunchuk": {
+        "report": {
+          "name": "nunchuk_6_byte_report",
+          "read_address": "0xA40008",
+          "length_bytes": 6,
+          "fields": {
+            "sx": {
+              "description": "joystick X",
+              "bits": 8,
+              "expression_c": "b[0]",
+              "range_nominal": [0, 255],
+              "range_typical_physical": [35, 228],
+              "center_typical": 128
+            },
+            "sy": {
+              "description": "joystick Y",
+              "bits": 8,
+              "expression_c": "b[1]",
+              "range_nominal": [0, 255],
+              "range_typical_physical": [27, 220],
+              "center_typical": 128
+            },
+            "ax": {
+              "description": "accelerometer X, 10-bit",
+              "bits": 10,
+              "expression_c": "((uint16_t)b[2] << 2) | ((b[5] >> 2) & 0x03)",
+              "range_nominal": [0, 1023]
+            },
+            "ay": {
+              "description": "accelerometer Y, 10-bit",
+              "bits": 10,
+              "expression_c": "((uint16_t)b[3] << 2) | ((b[5] >> 4) & 0x03)",
+              "range_nominal": [0, 1023]
+            },
+            "az": {
+              "description": "accelerometer Z, 10-bit",
+              "bits": 10,
+              "expression_c": "((uint16_t)b[4] << 2) | ((b[5] >> 6) & 0x03)",
+              "range_nominal": [0, 1023]
+            },
+            "button_c_pressed": {
+              "description": "C button, active low",
+              "bits": 1,
+              "expression_c": "!(b[5] & 0x02)"
+            },
+            "button_z_pressed": {
+              "description": "Z button, active low",
+              "bits": 1,
+              "expression_c": "!(b[5] & 0x01)"
+            }
+          },
+          "byte_layout": [
+            {
+              "byte": 0,
+              "bits_7_to_0": "SX[7:0]"
+            },
+            {
+              "byte": 1,
+              "bits_7_to_0": "SY[7:0]"
+            },
+            {
+              "byte": 2,
+              "bits_7_to_0": "AX[9:2]"
+            },
+            {
+              "byte": 3,
+              "bits_7_to_0": "AY[9:2]"
+            },
+            {
+              "byte": 4,
+              "bits_7_to_0": "AZ[9:2]"
+            },
+            {
+              "byte": 5,
+              "bits_7_to_0": "AZ[1:0], AY[1:0], AX[1:0], BC, BZ"
+            }
+          ]
+        }
+      },
+      "classic_controller": {
+        "data_format_register": "0xA400FE",
+        "supported_formats": {
+          "0x01": {
+            "name": "classic_controller_default_6_byte_report",
+            "read_address": "0xA40008",
+            "length_bytes": 6,
+            "description": "Default format. 6-bit left stick, 5-bit right stick/triggers, active-low buttons.",
+            "fields": {
+              "lx": {
+                "bits": 6,
+                "expression_c": "b[0] & 0x3F",
+                "range": [0, 63]
+              },
+              "ly": {
+                "bits": 6,
+                "expression_c": "b[1] & 0x3F",
+                "range": [0, 63]
+              },
+              "rx": {
+                "bits": 5,
+                "expression_c": "((b[0] >> 6) & 0x03) | ((b[1] >> 4) & 0x0C) | ((b[2] >> 2) & 0x10)",
+                "range": [0, 31]
+              },
+              "ry": {
+                "bits": 5,
+                "expression_c": "b[2] & 0x1F",
+                "range": [0, 31]
+              },
+              "lt": {
+                "bits": 5,
+                "expression_c": "((b[2] >> 5) & 0x03) | ((b[3] >> 5) & 0x07)",
+                "range": [0, 31]
+              },
+              "rt": {
+                "bits": 5,
+                "expression_c": "b[3] & 0x1F",
+                "range": [0, 31]
+              },
+              "dpad_right_pressed": {
+                "expression_c": "!(b[4] & 0x80)"
+              },
+              "dpad_down_pressed": {
+                "expression_c": "!(b[4] & 0x40)"
+              },
+              "lt_click_pressed": {
+                "expression_c": "!(b[4] & 0x20)"
+              },
+              "minus_pressed": {
+                "expression_c": "!(b[4] & 0x10)"
+              },
+              "home_pressed": {
+                "expression_c": "!(b[4] & 0x08)"
+              },
+              "plus_pressed": {
+                "expression_c": "!(b[4] & 0x04)"
+              },
+              "rt_click_pressed": {
+                "expression_c": "!(b[4] & 0x02)"
+              },
+              "constant_one_bit": {
+                "expression_c": "b[4] & 0x01",
+                "expected": 1
+              },
+              "zl_pressed": {
+                "expression_c": "!(b[5] & 0x80)"
+              },
+              "b_pressed": {
+                "expression_c": "!(b[5] & 0x40)"
+              },
+              "y_pressed": {
+                "expression_c": "!(b[5] & 0x20)"
+              },
+              "a_pressed": {
+                "expression_c": "!(b[5] & 0x10)"
+              },
+              "x_pressed": {
+                "expression_c": "!(b[5] & 0x08)"
+              },
+              "zr_pressed": {
+                "expression_c": "!(b[5] & 0x04)"
+              },
+              "dpad_left_pressed": {
+                "expression_c": "!(b[5] & 0x02)"
+              },
+              "dpad_up_pressed": {
+                "expression_c": "!(b[5] & 0x01)"
+              }
+            },
+            "byte_layout": [
+              {
+                "byte": 0,
+                "bits_7_to_0": "RX[4:3], LX[5:0]"
+              },
+              {
+                "byte": 1,
+                "bits_7_to_0": "RX[2:1], LY[5:0]"
+              },
+              {
+                "byte": 2,
+                "bits_7_to_0": "RX[0], LT[4:3], RY[4:0]"
+              },
+              {
+                "byte": 3,
+                "bits_7_to_0": "LT[2:0], RT[4:0]"
+              },
+              {
+                "byte": 4,
+                "bits_7_to_0": "BDR, BDD, BLT, B-, BH, B+, BRT, 1"
+              },
+              {
+                "byte": 5,
+                "bits_7_to_0": "BZL, BB, BY, BA, BX, BZR, BDL, BDU"
+              }
+            ]
+          },
+          "0x02": {
+            "name": "classic_controller_high_precision_9_byte_report",
+            "read_address": "0xA40008",
+            "length_bytes": 9,
+            "description": "10-bit sticks, 8-bit triggers, active-low buttons.",
+            "fields": {
+              "lx": {
+                "bits": 10,
+                "expression_c": "((uint16_t)b[0] << 2) | (b[4] & 0x03)",
+                "range": [0, 1023]
+              },
+              "rx": {
+                "bits": 10,
+                "expression_c": "((uint16_t)b[1] << 2) | ((b[4] >> 2) & 0x03)",
+                "range": [0, 1023]
+              },
+              "ly": {
+                "bits": 10,
+                "expression_c": "((uint16_t)b[2] << 2) | ((b[4] >> 4) & 0x03)",
+                "range": [0, 1023]
+              },
+              "ry": {
+                "bits": 10,
+                "expression_c": "((uint16_t)b[3] << 2) | ((b[4] >> 6) & 0x03)",
+                "range": [0, 1023]
+              },
+              "lt": {
+                "bits": 8,
+                "expression_c": "b[5]",
+                "range": [0, 255]
+              },
+              "rt": {
+                "bits": 8,
+                "expression_c": "b[6]",
+                "range": [0, 255]
+              },
+              "buttons_byte_0": {
+                "byte": 7,
+                "layout_bits_7_to_0": "BDR, BDD, BLT, B-, BH, B+, BRT, 1"
+              },
+              "buttons_byte_1": {
+                "byte": 8,
+                "layout_bits_7_to_0": "BZL, BB, BY, BA, BX, BZR, BDL, BDU"
+              }
+            },
+            "byte_layout": [
+              {
+                "byte": 0,
+                "bits_7_to_0": "LX[9:2]"
+              },
+              {
+                "byte": 1,
+                "bits_7_to_0": "RX[9:2]"
+              },
+              {
+                "byte": 2,
+                "bits_7_to_0": "LY[9:2]"
+              },
+              {
+                "byte": 3,
+                "bits_7_to_0": "RY[9:2]"
+              },
+              {
+                "byte": 4,
+                "bits_7_to_0": "RY[1:0], LY[1:0], RX[1:0], LX[1:0]"
+              },
+              {
+                "byte": 5,
+                "bits_7_to_0": "LT[7:0]"
+              },
+              {
+                "byte": 6,
+                "bits_7_to_0": "RT[7:0]"
+              },
+              {
+                "byte": 7,
+                "bits_7_to_0": "BDR, BDD, BLT, B-, BH, B+, BRT, 1"
+              },
+              {
+                "byte": 8,
+                "bits_7_to_0": "BZL, BB, BY, BA, BX, BZR, BDL, BDU"
+              }
+            ]
+          },
+          "0x03": {
+            "name": "classic_controller_8_byte_report",
+            "read_address": "0xA40008",
+            "length_bytes": 8,
+            "description": "8-bit sticks, 8-bit triggers, active-low buttons. Easiest byte-aligned format.",
+            "fields": {
+              "lx": {
+                "bits": 8,
+                "expression_c": "b[0]",
+                "range": [0, 255]
+              },
+              "rx": {
+                "bits": 8,
+                "expression_c": "b[1]",
+                "range": [0, 255]
+              },
+              "ly": {
+                "bits": 8,
+                "expression_c": "b[2]",
+                "range": [0, 255]
+              },
+              "ry": {
+                "bits": 8,
+                "expression_c": "b[3]",
+                "range": [0, 255]
+              },
+              "lt": {
+                "bits": 8,
+                "expression_c": "b[4]",
+                "range": [0, 255]
+              },
+              "rt": {
+                "bits": 8,
+                "expression_c": "b[5]",
+                "range": [0, 255]
+              },
+              "buttons_byte_0": {
+                "byte": 6,
+                "layout_bits_7_to_0": "BDR, BDD, BLT, B-, BH, B+, BRT, 1"
+              },
+              "buttons_byte_1": {
+                "byte": 7,
+                "layout_bits_7_to_0": "BZL, BB, BY, BA, BX, BZR, BDL, BDU"
+              }
+            },
+            "byte_layout": [
+              {
+                "byte": 0,
+                "bits_7_to_0": "LX[7:0]"
+              },
+              {
+                "byte": 1,
+                "bits_7_to_0": "RX[7:0]"
+              },
+              {
+                "byte": 2,
+                "bits_7_to_0": "LY[7:0]"
+              },
+              {
+                "byte": 3,
+                "bits_7_to_0": "RY[7:0]"
+              },
+              {
+                "byte": 4,
+                "bits_7_to_0": "LT[7:0]"
+              },
+              {
+                "byte": 5,
+                "bits_7_to_0": "RT[7:0]"
+              },
+              {
+                "byte": 6,
+                "bits_7_to_0": "BDR, BDD, BLT, B-, BH, B+, BRT, 1"
+              },
+              {
+                "byte": 7,
+                "bits_7_to_0": "BZL, BB, BY, BA, BX, BZR, BDL, BDU"
+              }
+            ]
+          }
+        }
+      },
+      "wii_motion_plus": {
+        "pre_activation": {
+          "register_base": "0xA60000",
+          "id_address": "0xA600FA",
+          "inactive_id": ["0x00", "0x00", "0xA6", "0x20", "0x00", "0x05"],
+          "activation_register": "0xA600FE"
+        },
+        "active_report": {
+          "name": "wii_motion_plus_6_byte_gyro_report",
+          "read_address": "0xA40008",
+          "alternate_read_address_note": "Some docs mention 0xA40000 in some cases.",
+          "length_bytes": 6,
+          "fields": {
+            "yaw_down_speed_raw": {
+              "description": "14-bit raw yaw/down angular-rate channel",
+              "bits": 14,
+              "expression_c": "((uint16_t)b[0]) | (((uint16_t)b[3] & 0xFC) << 6)"
+            },
+            "roll_left_speed_raw": {
+              "description": "14-bit raw roll/left angular-rate channel",
+              "bits": 14,
+              "expression_c": "((uint16_t)b[1]) | (((uint16_t)b[4] & 0xFC) << 6)"
+            },
+            "pitch_left_speed_raw": {
+              "description": "14-bit raw pitch/left angular-rate channel",
+              "bits": 14,
+              "expression_c": "((uint16_t)b[2]) | (((uint16_t)b[5] & 0xFC) << 6)"
+            },
+            "yaw_slow_mode": {
+              "description": "1 when slow or still, 0 when fast",
+              "expression_c": "!!(b[3] & 0x02)"
+            },
+            "pitch_slow_mode": {
+              "description": "1 when slow or still, 0 when fast",
+              "expression_c": "!!(b[3] & 0x01)"
+            },
+            "roll_slow_mode": {
+              "description": "1 when slow or still, 0 when fast",
+              "expression_c": "!!(b[4] & 0x02)"
+            },
+            "extension_connected_to_motionplus_port": {
+              "description": "1 when extension is connected to MotionPlus passthrough port",
+              "expression_c": "!!(b[4] & 0x01)"
+            },
+            "report_type_motionplus_vs_passthrough": {
+              "description": "In passthrough/interleaved mode, bit 1 of byte 5 is used to tell MotionPlus report vs extension report. WiiBrew: 1 means MotionPlus data, 0 means extension data.",
+              "expression_c": "!!(b[5] & 0x02)"
+            },
+            "reserved_or_constant_bit0": {
+              "description": "Documented as 0 in normal MotionPlus layout.",
+              "expression_c": "b[5] & 0x01"
+            }
+          },
+          "byte_layout": [
+            {
+              "byte": 0,
+              "bits_7_to_0": "YawDownSpeed[7:0]"
+            },
+            {
+              "byte": 1,
+              "bits_7_to_0": "RollLeftSpeed[7:0]"
+            },
+            {
+              "byte": 2,
+              "bits_7_to_0": "PitchLeftSpeed[7:0]"
+            },
+            {
+              "byte": 3,
+              "bits_7_to_2": "YawDownSpeed[13:8]",
+              "bit_1": "YawSlowMode",
+              "bit_0": "PitchSlowMode"
+            },
+            {
+              "byte": 4,
+              "bits_7_to_2": "RollLeftSpeed[13:8]",
+              "bit_1": "RollSlowMode",
+              "bit_0": "ExtensionConnected"
+            },
+            {
+              "byte": 5,
+              "bits_7_to_2": "PitchLeftSpeed[13:8]",
+              "bit_1": "MotionPlusReportFlagInPassthrough_or_1",
+              "bit_0": "0"
+            }
+          ],
+          "calibration": {
+            "calibration_base": "0xA60020",
+            "zero_raw_while_still_typical": "about 0x1F7F, but calibrate on startup",
+            "slow_bit_meaning": "1 means slow or still, 0 means fast",
+            "deg_per_second_note": "WiiBrew suggests dividing slow-mode delta by approximately 13.768 units per deg/s, with fast mode multiplied by about 2000/440 relative to slow."
+          }
+        },
+        "nunchuk_passthrough_report": {
+          "name": "motion_plus_nunchuk_passthrough_modified_nunchuk_report",
+          "activation_value_at_0xA600FE": "0x05",
+          "length_bytes": 6,
+          "interleaving_note": "MotionPlus and modified Nunchuk reports alternate. In passthrough mode, bit 1 of byte 5 distinguishes report type: 1 MotionPlus, 0 extension.",
+          "fields": {
+            "sx": {
+              "expression_c": "b[0]"
+            },
+            "sy": {
+              "expression_c": "b[1]"
+            },
+            "ax": {
+              "description": "10-bit reconstructed with lost LSB forced to 0",
+              "expression_c": "((uint16_t)b[2] << 2) | (((b[5] >> 4) & 0x01) << 1)"
+            },
+            "ay": {
+              "description": "10-bit reconstructed with lost LSB forced to 0",
+              "expression_c": "((uint16_t)b[3] << 2) | (((b[5] >> 5) & 0x01) << 1)"
+            },
+            "az": {
+              "description": "10-bit reconstructed with lost LSB forced to 0",
+              "expression_c": "((uint16_t)(b[4] >> 1) << 3) | (((b[5] >> 6) & 0x03) << 1)"
+            },
+            "extension_connected": {
+              "expression_c": "!!(b[4] & 0x01)"
+            },
+            "button_c_pressed": {
+              "expression_c": "!(b[5] & 0x08)"
+            },
+            "button_z_pressed": {
+              "expression_c": "!(b[5] & 0x04)"
+            },
+            "report_type_is_extension_data": {
+              "expression_c": "!(b[5] & 0x02)"
+            }
+          },
+          "byte_layout": [
+            {
+              "byte": 0,
+              "bits_7_to_0": "SX[7:0]"
+            },
+            {
+              "byte": 1,
+              "bits_7_to_0": "SY[7:0]"
+            },
+            {
+              "byte": 2,
+              "bits_7_to_0": "AX[9:2]"
+            },
+            {
+              "byte": 3,
+              "bits_7_to_0": "AY[9:2]"
+            },
+            {
+              "byte": 4,
+              "bits_7_to_1": "AZ[9:3]",
+              "bit_0": "ExtensionConnected"
+            },
+            {
+              "byte": 5,
+              "bits_7_to_6": "AZ[2:1]",
+              "bit_5": "AY[1]",
+              "bit_4": "AX[1]",
+              "bit_3": "BC",
+              "bit_2": "BZ",
+              "bit_1": "ReportTypeFlag",
+              "bit_0": "0"
+            }
+          ]
+        },
+        "classic_passthrough_report": {
+          "name": "motion_plus_classic_passthrough_modified_classic_report",
+          "activation_value_at_0xA600FE": "0x07",
+          "length_bytes": 6,
+          "interleaving_note": "MotionPlus and modified Classic Controller reports alternate. In passthrough mode, bit 1 of byte 5 distinguishes report type: 1 MotionPlus, 0 extension.",
+          "fields": {
+            "lx_5bit_shifted": {
+              "description": "Left stick X loses its least significant bit in passthrough.",
+              "expression_c": "(b[0] >> 1) & 0x1F"
+            },
+            "ly_5bit_shifted": {
+              "description": "Left stick Y loses its least significant bit in passthrough.",
+              "expression_c": "(b[1] >> 1) & 0x1F"
+            },
+            "rx": {
+              "description": "5-bit RX packed similarly to normal classic format.",
+              "expression_c": "((b[0] >> 6) & 0x03) | ((b[1] >> 4) & 0x0C) | ((b[2] >> 2) & 0x10)"
+            },
+            "ry": {
+              "expression_c": "b[2] & 0x1F"
+            },
+            "lt": {
+              "expression_c": "((b[2] >> 5) & 0x03) | ((b[3] >> 5) & 0x07)"
+            },
+            "rt": {
+              "expression_c": "b[3] & 0x1F"
+            },
+            "dpad_up_pressed": {
+              "description": "Moved into byte 0 bit 0 in passthrough.",
+              "expression_c": "!(b[0] & 0x01)"
+            },
+            "dpad_left_pressed": {
+              "description": "Moved into byte 1 bit 0 in passthrough.",
+              "expression_c": "!(b[1] & 0x01)"
+            },
+            "dpad_right_pressed": {
+              "expression_c": "!(b[4] & 0x80)"
+            },
+            "dpad_down_pressed": {
+              "expression_c": "!(b[4] & 0x40)"
+            },
+            "lt_click_pressed": {
+              "expression_c": "!(b[4] & 0x20)"
+            },
+            "minus_pressed": {
+              "expression_c": "!(b[4] & 0x10)"
+            },
+            "home_pressed": {
+              "expression_c": "!(b[4] & 0x08)"
+            },
+            "plus_pressed": {
+              "expression_c": "!(b[4] & 0x04)"
+            },
+            "rt_click_pressed": {
+              "expression_c": "!(b[4] & 0x02)"
+            },
+            "extension_connected": {
+              "expression_c": "!!(b[4] & 0x01)"
+            },
+            "zl_pressed": {
+              "expression_c": "!(b[5] & 0x80)"
+            },
+            "b_pressed": {
+              "expression_c": "!(b[5] & 0x40)"
+            },
+            "y_pressed": {
+              "expression_c": "!(b[5] & 0x20)"
+            },
+            "a_pressed": {
+              "expression_c": "!(b[5] & 0x10)"
+            },
+            "x_pressed": {
+              "expression_c": "!(b[5] & 0x08)"
+            },
+            "zr_pressed": {
+              "expression_c": "!(b[5] & 0x04)"
+            },
+            "report_type_is_extension_data": {
+              "expression_c": "!(b[5] & 0x02)"
+            }
+          },
+          "byte_layout": [
+            {
+              "byte": 0,
+              "bits_7_to_6": "RX[4:3]",
+              "bits_5_to_1": "LX[5:1]",
+              "bit_0": "BDU"
+            },
+            {
+              "byte": 1,
+              "bits_7_to_6": "RX[2:1]",
+              "bits_5_to_1": "LY[5:1]",
+              "bit_0": "BDL"
+            },
+            {
+              "byte": 2,
+              "bit_7": "RX[0]",
+              "bits_6_to_5": "LT[4:3]",
+              "bits_4_to_0": "RY[4:0]"
+            },
+            {
+              "byte": 3,
+              "bits_7_to_5": "LT[2:0]",
+              "bits_4_to_0": "RT[4:0]"
+            },
+            {
+              "byte": 4,
+              "bits_7_to_0": "BDR, BDD, BLT, B-, BH, B+, BRT, ExtensionConnected"
+            },
+            {
+              "byte": 5,
+              "bits_7_to_2": "BZL, BB, BY, BA, BX, BZR",
+              "bit_1": "ReportTypeFlag",
+              "bit_0": "0"
+            }
+          ]
+        }
+      }
+    },
+    "wiimote_hid_extension_streaming_context": {
+      "note": "These are Bluetooth HID report modes from Wiimote to host that can include extension bytes. They are not I2C bus frames themselves.",
+      "common_modes": {
+        "0x35": {
+          "name": "Core Buttons + Accelerometer + 16 Extension Bytes",
+          "extension_bytes": 16
+        },
+        "0x36": {
+          "name": "Core Buttons + 10 IR Bytes + 9 Extension Bytes",
+          "extension_bytes": 9
+        },
+        "0x37": {
+          "name": "Core Buttons + Accelerometer + 10 IR Bytes + 6 Extension Bytes",
+          "extension_bytes": 6
+        }
+      }
+    },
+    "implementation_recommendations": {
+      "easiest_emulation_target": "nunchuk",
+      "most_compatible_many_buttons_target": "classic_controller_format_0x01",
+      "easiest_byte_aligned_classic_target": "classic_controller_format_0x03",
+      "motion_plus_emulation_complexity": "higher, because activation address, calibration, gyro zeroing, and passthrough interleaving matter",
+      "for_custom_esp32_extension": [
+        "Implement I2C slave at address 0x52.",
+        "Expose a 256-byte register map.",
+        "Return a valid 6-byte ID at 0xA400FA after init.",
+        "Respond to writes at 0xA400F0, 0xA400FB, and possibly 0xA400FE.",
+        "Update report bytes beginning at 0xA40008.",
+        "Use active-low button bits for compatibility."
+      ]
+    }
+  }

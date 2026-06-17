@@ -10,6 +10,7 @@
 #include "button_pins.h"
 #include "orientation.h"
 #include "prism_view.h"
+#include "wii_i2c_view.h"
 
 namespace {
 
@@ -22,7 +23,7 @@ constexpr uint32_t kCalFlashMs = 400;
 constexpr uint16_t kHeaderColor = 0x0010;
 constexpr uint16_t kGridColor = 0x4208;
 
-enum class Screen : uint8_t { ImuDashboard, Prism3D };
+enum class Screen : uint8_t { ImuDashboard, Prism3D, WiiI2c };
 
 constexpr int kGraphX = 4;
 constexpr int kGraphY = 108;
@@ -79,18 +80,27 @@ void showPrismView() {
                               orientationTracker.axisMapLabel());
 }
 
+void showWiiI2cView() {
+  wii_i2c::enter(tft);
+}
+
 void executeDoubleTap() {
+  if (activeScreen == Screen::WiiI2c) {
+    return;
+  }
   if (activeScreen == Screen::ImuDashboard) {
     activeScreen = Screen::Prism3D;
   }
-  if (prismShowAxes) {
-    orientationTracker.nextAxisMap();
-  } else {
-    prismShowAxes = true;
+  if (activeScreen == Screen::Prism3D) {
+    if (prismShowAxes) {
+      orientationTracker.nextAxisMap();
+    } else {
+      prismShowAxes = true;
+    }
+    showPrismView();
+    Serial.printf("Axis map %u: %s (R/P/Y = red/green/blue)\n", orientationTracker.axisMapIndex(),
+                  orientationTracker.axisMapLabel());
   }
-  showPrismView();
-  Serial.printf("Axis map %u: %s (R/P/Y = red/green/blue)\n", orientationTracker.axisMapIndex(),
-                orientationTracker.axisMapLabel());
 }
 
 void executeSingleTapToggle() {
@@ -98,6 +108,10 @@ void executeSingleTapToggle() {
     activeScreen = Screen::Prism3D;
     showPrismView();
     Serial.println(F("Screen: 3D prism"));
+  } else if (activeScreen == Screen::Prism3D) {
+    activeScreen = Screen::WiiI2c;
+    showWiiI2cView();
+    Serial.println(F("Screen: Wii I2C"));
   } else {
     activeScreen = Screen::ImuDashboard;
     showImuDashboard();
@@ -366,11 +380,12 @@ void setup() {
   tft.setRotation(0);
 
   imuOk = initImu();
+  wii_i2c::begin();
   if (imuOk) {
     orientationTracker.reset();
     gravityReference.reset();
     showImuDashboard();
-    Serial.println(F("IMU OK — tap: toggle | double-tap: axis map | hold: switch view"));
+    Serial.println(F("IMU OK — tap: cycle screens | double-tap: axis map | hold: 3D view"));
   } else {
     drawErrorScreen();
     Serial.println(F("IMU begin() failed — check wiring"));
@@ -396,11 +411,14 @@ void loop() {
     Serial.printf("A  X:%8.1f  Y:%8.1f  Z:%8.1f  |  G  X:%8.1f  Y:%8.1f  Z:%8.1f\n",
                   accel.xData, accel.yData, accel.zData, gyro.xData, gyro.yData, gyro.zData);
     delay(kRefreshMs);
-  } else {
+  } else if (activeScreen == Screen::Prism3D) {
     showPrismView();
     if (millis() < calFlashUntilMs) {
       tft.fillCircle(LCD_WIDTH - 10, 10, 4, ST77XX_GREEN);
     }
     delay(kPrismRefreshMs);
+  } else {
+    wii_i2c::refresh(tft);
+    delay(kRefreshMs);
   }
 }
