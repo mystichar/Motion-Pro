@@ -8,14 +8,17 @@
 #include "display_pins.h"
 #include "imu_pins.h"
 #include "button_pins.h"
+#include "orientation.h"
 #include "prism_view.h"
 
 namespace {
 
 constexpr uint32_t kRefreshMs = 50;
 constexpr uint32_t kBtnDebounceMs = 50;
+constexpr uint32_t kBtnHoldCalMs = 800;
+constexpr uint32_t kDoubleTapWindowMs = 400;
 constexpr uint32_t kPrismRefreshMs = 33;
-constexpr float kPrismRotSpeed = 0.55f;
+constexpr uint32_t kCalFlashMs = 400;
 constexpr uint16_t kHeaderColor = 0x0010;
 constexpr uint16_t kGridColor = 0x4208;
 
@@ -46,17 +49,63 @@ GFXcanvas16 graphCanvas(kCanvasW, kCanvasH);
 
 bool imuOk = false;
 Screen activeScreen = Screen::ImuDashboard;
-bool btnWasPressed = false;
-uint32_t btnLastChangeMs = 0;
+orient::Tracker orientationTracker;
+orient::GravityReference gravityReference;
+bool btnIsPressed = false;
+bool btnHoldHandled = false;
+bool prismShowAxes = false;
+bool pendingSingleTap = false;
+uint32_t btnPressStartMs = 0;
+uint32_t btnLastEdgeMs = 0;
+uint32_t lastTapReleaseMs = 0;
+uint32_t pendingSingleTapAtMs = 0;
+uint32_t calFlashUntilMs = 0;
 
 void drawStaticChrome();
+void showImuDashboard();
+void executeSingleTapToggle();
+void executeDoubleTap();
 
 void setupButton() {
   pinMode(BTN_GPIO, INPUT_PULLUP);
 }
 
 void showPrismView() {
-  prism::drawRotatingPrism(tft, LCD_WIDTH, LCD_HEIGHT, 0.0f);
+  prism::drawPrismWithOverlay(tft, LCD_WIDTH, LCD_HEIGHT, orientationTracker.orientation(),
+                              gravityReference.up(), prismShowAxes, orientationTracker.axisMapIndex(),
+                              orientationTracker.axisMapLabel());
+}
+
+void executeDoubleTap() {
+  if (activeScreen == Screen::ImuDashboard) {
+    activeScreen = Screen::Prism3D;
+  }
+  if (prismShowAxes) {
+    orientationTracker.nextAxisMap();
+  } else {
+    prismShowAxes = true;
+  }
+  showPrismView();
+  Serial.printf("Axis map %u: %s (R/P/Y = red/green/blue)\n", orientationTracker.axisMapIndex(),
+                orientationTracker.axisMapLabel());
+}
+
+void executeSingleTapToggle() {
+  if (activeScreen == Screen::ImuDashboard) {
+    activeScreen = Screen::Prism3D;
+    showPrismView();
+    Serial.println(F("Screen: 3D prism"));
+  } else {
+    activeScreen = Screen::ImuDashboard;
+    showImuDashboard();
+    Serial.println(F("Screen: IMU dashboard"));
+  }
+}
+
+void recenterPrismView() {
+  orientationTracker.recenterViewUpright(accel.xData, accel.yData, accel.zData);
+  calFlashUntilMs = millis() + kCalFlashMs;
+  Serial.println(F("View reset: front toward you, upright"));
 }
 
 void resetGraphHistory() {
@@ -76,24 +125,39 @@ void showImuDashboard() {
 void pollScreenButton() {
   const bool pressed = digitalRead(BTN_GPIO) == LOW;
   const uint32_t now = millis();
-  if (pressed == btnWasPressed || (now - btnLastChangeMs) < kBtnDebounceMs) {
-    return;
+
+  if (pressed != btnIsPressed && (now - btnLastEdgeMs) >= kBtnDebounceMs) {
+    btnLastEdgeMs = now;
+    btnIsPressed = pressed;
+    if (pressed) {
+      btnPressStartMs = now;
+      btnHoldHandled = false;
+    } else if (!btnHoldHandled && (now - btnPressStartMs) < kBtnHoldCalMs) {
+      if (lastTapReleaseMs != 0 && (now - lastTapReleaseMs) <= kDoubleTapWindowMs) {
+        pendingSingleTap = false;
+        lastTapReleaseMs = 0;
+        executeDoubleTap();
+      } else {
+        pendingSingleTap = true;
+        pendingSingleTapAtMs = now + kDoubleTapWindowMs;
+        lastTapReleaseMs = now;
+      }
+    }
   }
 
-  btnLastChangeMs = now;
-  btnWasPressed = pressed;
-  if (!pressed) {
-    return;
+  if (pendingSingleTap && now >= pendingSingleTapAtMs) {
+    pendingSingleTap = false;
+    lastTapReleaseMs = 0;
+    executeSingleTapToggle();
   }
 
-  if (activeScreen == Screen::ImuDashboard) {
-    activeScreen = Screen::Prism3D;
-    showPrismView();
-    Serial.println(F("Screen: 3D prism"));
-  } else {
-    activeScreen = Screen::ImuDashboard;
-    showImuDashboard();
-    Serial.println(F("Screen: IMU dashboard"));
+  if (pressed && !btnHoldHandled && (now - btnPressStartMs) >= kBtnHoldCalMs) {
+    btnHoldHandled = true;
+    pendingSingleTap = false;
+    recenterPrismView();
+    if (activeScreen == Screen::Prism3D) {
+      showPrismView();
+    }
   }
 }
 
@@ -294,8 +358,10 @@ void setup() {
 
   imuOk = initImu();
   if (imuOk) {
+    orientationTracker.reset();
+    gravityReference.reset();
     showImuDashboard();
-    Serial.println(F("IMU OK — GPIO12 toggles IMU / 3D prism"));
+    Serial.println(F("IMU OK — tap: toggle | double-tap: axis map | hold: reset view"));
   } else {
     drawErrorScreen();
     Serial.println(F("IMU begin() failed — check wiring"));
@@ -309,6 +375,8 @@ void loop() {
   }
 
   readImu();
+  orientationTracker.updateGyro(gyro.xData, gyro.yData, gyro.zData);
+  gravityReference.updateAccel(accel.xData, accel.yData, accel.zData, orientationTracker.axisMap());
   pollScreenButton();
 
   if (activeScreen == Screen::ImuDashboard) {
@@ -320,8 +388,10 @@ void loop() {
                   accel.xData, accel.yData, accel.zData, gyro.xData, gyro.yData, gyro.zData);
     delay(kRefreshMs);
   } else {
-    const float angle = millis() * 0.001f * kPrismRotSpeed;
-    prism::drawRotatingPrism(tft, LCD_WIDTH, LCD_HEIGHT, angle);
+    showPrismView();
+    if (millis() < calFlashUntilMs) {
+      tft.fillCircle(LCD_WIDTH - 10, 10, 4, ST77XX_GREEN);
+    }
     delay(kPrismRefreshMs);
   }
 }
