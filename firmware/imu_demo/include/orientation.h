@@ -244,9 +244,17 @@ class GravityReference {
   void reset() {
     filteredUp_ = {0.0f, 1.0f, 0.0f};
     hasSample_ = false;
+    lastUs_ = micros();
   }
 
   void updateAccel(float axMilliG, float ayMilliG, float azMilliG, const AxisMap& map) {
+    const uint32_t nowUs = micros();
+    float dt = (nowUs - lastUs_) * 1e-6f;
+    lastUs_ = nowUs;
+    if (dt <= 0.0f || dt > 0.25f) {
+      dt = 0.033f;
+    }
+
     const Vec3 raw = remapSensorAxes(axMilliG, ayMilliG, azMilliG, map);
     const float len = sqrtf(raw.x * raw.x + raw.y * raw.y + raw.z * raw.z);
     if (len < 50.0f) {
@@ -260,10 +268,16 @@ class GravityReference {
       return;
     }
 
-    constexpr float kAlpha = 0.12f;
-    filteredUp_.x += kAlpha * (up.x - filteredUp_.x);
-    filteredUp_.y += kAlpha * (up.y - filteredUp_.y);
-    filteredUp_.z += kAlpha * (up.z - filteredUp_.z);
+    // Time-based smoothing (~60 ms when still, slower when |a| != g during motion).
+    constexpr float kTauStillSec = 0.06f;
+    constexpr float kTauMotionSec = 0.18f;
+    const float tau =
+        (len > 900.0f && len < 1100.0f) ? kTauStillSec : kTauMotionSec;
+    const float alpha = 1.0f - expf(-dt / tau);
+
+    filteredUp_.x += alpha * (up.x - filteredUp_.x);
+    filteredUp_.y += alpha * (up.y - filteredUp_.y);
+    filteredUp_.z += alpha * (up.z - filteredUp_.z);
     filteredUp_ = vec3Normalize(filteredUp_);
   }
 
@@ -274,6 +288,7 @@ class GravityReference {
  private:
   Vec3 filteredUp_{0.0f, 1.0f, 0.0f};
   bool hasSample_ = false;
+  uint32_t lastUs_ = 0;
 };
 
 }  // namespace orient
