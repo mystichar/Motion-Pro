@@ -5,10 +5,10 @@
 #include <math.h>
 
 #include "orientation.h"
-#include "wiimote_mesh.h"
+#include "wiimote_textures.h"
 
-// Wiimote mesh from assets/*.glb (see scripts/embed_glb.py). Renders to an off-screen buffer
-// each frame, then blits once (no partial-frame flicker).
+// Wiimote-shaped box: 9 (X) x 8 (Y) x 36 (Z) — matches assets/*.png aspect ratios.
+// Renders to an off-screen buffer each frame, then blits once (no partial-frame flicker).
 
 namespace prism {
 
@@ -25,6 +25,10 @@ struct Projected {
   int16_t y;
   float z;
 };
+
+constexpr float kHalfWidth = 4.5f;
+constexpr float kHalfHeight = 4.0f;
+constexpr float kHalfDepth = 18.0f;
 
 constexpr float kScale = 3.0f;
 
@@ -145,20 +149,41 @@ inline orient::Vec3 normalWorldToView(const ViewFrame& frame, orient::Vec3 world
   };
 }
 
-inline Vec3 meshModelVertex(uint16_t index) {
-  const uint32_t base = (uint32_t)index * 3u;
-  return {
-      pgm_read_float(&kMeshPos[base]),
-      pgm_read_float(&kMeshPos[base + 1u]),
-      pgm_read_float(&kMeshPos[base + 2u]),
-  };
-}
+constexpr Vec3 kBaseVerts[8] = {
+    {-kHalfWidth, -kHalfHeight, -kHalfDepth},
+    {kHalfWidth, -kHalfHeight, -kHalfDepth},
+    {kHalfWidth, kHalfHeight, -kHalfDepth},
+    {-kHalfWidth, kHalfHeight, -kHalfDepth},
+    {-kHalfWidth, -kHalfHeight, kHalfDepth},
+    {kHalfWidth, -kHalfHeight, kHalfDepth},
+    {kHalfWidth, kHalfHeight, kHalfDepth},
+    {-kHalfWidth, kHalfHeight, kHalfDepth},
+};
 
-inline void meshModelUv(uint16_t index, float& u, float& v) {
-  const uint32_t base = (uint32_t)index * 2u;
-  u = pgm_read_word(&kMeshUV[base]) / 65535.0f;
-  v = pgm_read_word(&kMeshUV[base + 1u]) / 65535.0f;
-}
+struct Face {
+  uint8_t i0;
+  uint8_t i1;
+  uint8_t i2;
+  uint8_t i3;
+  WiimoteFaceTex texture;
+  float u0;
+  float v0;
+  float u1;
+  float v1;
+  float u2;
+  float v2;
+  float u3;
+  float v3;
+};
+
+constexpr Face kFaces[6] = {
+    {4, 5, 6, 7, WiimoteFaceTex::Front, 0, 1, 1, 1, 1, 0, 0, 0},
+    {1, 0, 3, 2, WiimoteFaceTex::Back, 1, 0, 0, 0, 0, 1, 1, 1},
+    {5, 1, 2, 6, WiimoteFaceTex::None, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 4, 7, 3, WiimoteFaceTex::None, 0, 0, 0, 0, 0, 0, 0, 0},
+    {7, 6, 2, 3, WiimoteFaceTex::Top, 0, 0, 1, 0, 1, 1, 0, 1},
+    {0, 1, 5, 4, WiimoteFaceTex::Bottom, 0, 1, 1, 1, 1, 0, 0, 0},
+};
 
 constexpr float kLightX = 0.35f;
 constexpr float kLightY = 0.65f;
@@ -316,14 +341,16 @@ inline uint16_t shadeRgb565(uint16_t color, float brightness) {
   return (r << 11) | (g << 5) | b;
 }
 
-inline float minTriZ(const Projected& p0, const Projected& p1, const Projected& p2) {
+inline float minFaceZ(const Projected& p0, const Projected& p1, const Projected& p2,
+                      const Projected& p3) {
   float z = p0.z;
   if (p1.z < z) z = p1.z;
   if (p2.z < z) z = p2.z;
+  if (p3.z < z) z = p3.z;
   return z;
 }
 
-inline uint16_t sampleTexture(const WiimoteMeshTexture& tex, float u, float v) {
+inline uint16_t sampleTexture(const WiimoteTexture& tex, float u, float v) {
   if (!tex.data || tex.width == 0 || tex.height == 0) {
     return ST77XX_WHITE;
   }
@@ -341,7 +368,7 @@ inline void drawSolidTriangle(GFXcanvas16& canvas, int x0, int y0, int x1, int y
 
 inline void drawTexturedTriangle(GFXcanvas16& canvas, int x0, int y0, float u0, float v0, int x1,
                                  int y1, float u1, float v1, int x2, int y2, float u2, float v2,
-                                 const WiimoteMeshTexture& tex, float lighting) {
+                                 const WiimoteTexture& tex, float lighting) {
   if (!tex.data) {
     return;
   }
@@ -387,8 +414,25 @@ inline void drawTexturedTriangle(GFXcanvas16& canvas, int x0, int y0, float u0, 
   }
 }
 
-struct TriDraw {
-  uint16_t index;
+inline void drawFace(GFXcanvas16& canvas, const Face& face, const Projected& p0,
+                     const Projected& p1, const Projected& p2, const Projected& p3,
+                     float lighting) {
+  if (face.texture == WiimoteFaceTex::None) {
+    const uint16_t color = shadedWhite(lighting);
+    drawSolidTriangle(canvas, p0.x, p0.y, p1.x, p1.y, p2.x, p2.y, color);
+    drawSolidTriangle(canvas, p0.x, p0.y, p2.x, p2.y, p3.x, p3.y, color);
+    return;
+  }
+
+  const WiimoteTexture tex = wiimoteTextureFor(face.texture);
+  drawTexturedTriangle(canvas, p0.x, p0.y, face.u0, face.v0, p1.x, p1.y, face.u1, face.v1, p2.x,
+                       p2.y, face.u2, face.v2, tex, lighting);
+  drawTexturedTriangle(canvas, p0.x, p0.y, face.u0, face.v0, p2.x, p2.y, face.u2, face.v2, p3.x,
+                       p3.y, face.u3, face.v3, tex, lighting);
+}
+
+struct FaceDraw {
+  uint8_t index;
   float sortZ;
 };
 
@@ -408,18 +452,19 @@ inline void drawPrism(Adafruit_ST7789& tft, int screenW, int screenH, SceneViewM
   const orient::Quat qDraw =
       (mode == SceneViewMode::WiimoteFixed) ? orient::quatIdentity() : qWorldWiimote;
 
-  TriDraw order[kMeshTriangleCount];
-  uint16_t visibleCount = 0;
-  for (uint16_t t = 0; t < kMeshTriangleCount; ++t) {
-    const uint32_t idxBase = (uint32_t)t * 3u;
-    const uint16_t i0 = pgm_read_word(&kMeshIndex[idxBase]);
-    const uint16_t i1 = pgm_read_word(&kMeshIndex[idxBase + 1u]);
-    const uint16_t i2 = pgm_read_word(&kMeshIndex[idxBase + 2u]);
+  Projected projected[8];
+  for (uint8_t i = 0; i < 8; ++i) {
+    const orient::Vec3 model = {kBaseVerts[i].x, kBaseVerts[i].y, kBaseVerts[i].z};
+    const orient::Vec3 w = modelPointToWorld(qDraw, model);
+    projected[i] = projectViewPoint(screenW, screenH, worldToView(camera, w));
+  }
 
-    const Vec3 v0 = meshModelVertex(i0);
-    const Vec3 v1 = meshModelVertex(i1);
-    const Vec3 v2 = meshModelVertex(i2);
-    const Vec3 modelNormal = faceNormal(v0, v1, v2);
+  FaceDraw order[6];
+  uint8_t visibleCount = 0;
+  for (uint8_t f = 0; f < 6; ++f) {
+    const Face& face = kFaces[f];
+    const Vec3 modelNormal =
+        faceNormal(kBaseVerts[face.i0], kBaseVerts[face.i1], kBaseVerts[face.i2]);
     const orient::Vec3 worldNormal =
         normalModelToWorld(qDraw, {modelNormal.x, modelNormal.y, modelNormal.z});
     const orient::Vec3 viewNormal = normalWorldToView(camera, worldNormal);
@@ -427,23 +472,17 @@ inline void drawPrism(Adafruit_ST7789& tft, int screenW, int screenH, SceneViewM
       continue;
     }
 
-    const orient::Vec3 w0 = modelPointToWorld(qDraw, {v0.x, v0.y, v0.z});
-    const orient::Vec3 w1 = modelPointToWorld(qDraw, {v1.x, v1.y, v1.z});
-    const orient::Vec3 w2 = modelPointToWorld(qDraw, {v2.x, v2.y, v2.z});
-    const Projected p0 = projectViewPoint(screenW, screenH, worldToView(camera, w0));
-    const Projected p1 = projectViewPoint(screenW, screenH, worldToView(camera, w1));
-    const Projected p2 = projectViewPoint(screenW, screenH, worldToView(camera, w2));
-
-    order[visibleCount].index = t;
-    order[visibleCount].sortZ = minTriZ(p0, p1, p2);
+    order[visibleCount].index = f;
+    order[visibleCount].sortZ =
+        minFaceZ(projected[face.i0], projected[face.i1], projected[face.i2], projected[face.i3]);
     ++visibleCount;
   }
 
-  for (uint16_t a = 0; a + 1 < visibleCount; ++a) {
-    for (uint16_t b = a + 1; b < visibleCount; ++b) {
+  for (uint8_t a = 0; a + 1 < visibleCount; ++a) {
+    for (uint8_t b = a + 1; b < visibleCount; ++b) {
       if (order[a].sortZ > order[b].sortZ ||
           (order[a].sortZ == order[b].sortZ && order[a].index > order[b].index)) {
-        const TriDraw tmp = order[a];
+        const FaceDraw tmp = order[a];
         order[a] = order[b];
         order[b] = tmp;
       }
@@ -457,39 +496,15 @@ inline void drawPrism(Adafruit_ST7789& tft, int screenW, int screenH, SceneViewM
     drawGroundPlaneGravity(canvas, screenW, screenH, camera, gravityUp);
   }
 
-  for (uint16_t o = 0; o < visibleCount; ++o) {
-    const uint16_t t = order[o].index;
-    const uint32_t idxBase = (uint32_t)t * 3u;
-    const uint16_t i0 = pgm_read_word(&kMeshIndex[idxBase]);
-    const uint16_t i1 = pgm_read_word(&kMeshIndex[idxBase + 1u]);
-    const uint16_t i2 = pgm_read_word(&kMeshIndex[idxBase + 2u]);
-
-    const Vec3 v0 = meshModelVertex(i0);
-    const Vec3 v1 = meshModelVertex(i1);
-    const Vec3 v2 = meshModelVertex(i2);
-    const Vec3 modelNormal = faceNormal(v0, v1, v2);
+  for (uint8_t o = 0; o < visibleCount; ++o) {
+    const Face& face = kFaces[order[o].index];
+    const Vec3 modelNormal =
+        faceNormal(kBaseVerts[face.i0], kBaseVerts[face.i1], kBaseVerts[face.i2]);
     const orient::Vec3 worldNormal =
         normalModelToWorld(qDraw, {modelNormal.x, modelNormal.y, modelNormal.z});
     const float lighting = worldNormal.x * kLightX + worldNormal.y * kLightY + worldNormal.z * kLightZ;
-
-    const orient::Vec3 w0 = modelPointToWorld(qDraw, {v0.x, v0.y, v0.z});
-    const orient::Vec3 w1 = modelPointToWorld(qDraw, {v1.x, v1.y, v1.z});
-    const orient::Vec3 w2 = modelPointToWorld(qDraw, {v2.x, v2.y, v2.z});
-    const Projected p0 = projectViewPoint(screenW, screenH, worldToView(camera, w0));
-    const Projected p1 = projectViewPoint(screenW, screenH, worldToView(camera, w1));
-    const Projected p2 = projectViewPoint(screenW, screenH, worldToView(camera, w2));
-
-    float tu0 = 0.0f;
-    float tv0 = 0.0f;
-    float tu1 = 0.0f;
-    float tv1 = 0.0f;
-    float tu2 = 0.0f;
-    float tv2 = 0.0f;
-    meshModelUv(i0, tu0, tv0);
-    meshModelUv(i1, tu1, tv1);
-    meshModelUv(i2, tu2, tv2);
-    drawTexturedTriangle(canvas, p0.x, p0.y, tu0, tv0, p1.x, p1.y, tu1, tv1, p2.x, p2.y, tu2, tv2,
-                         kMeshTexture, lighting);
+    drawFace(canvas, face, projected[face.i0], projected[face.i1], projected[face.i2],
+             projected[face.i3], lighting);
   }
 
   drawModeLabel(canvas, mode);
