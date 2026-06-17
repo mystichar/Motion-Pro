@@ -11,3 +11,7 @@ An upgrade intended to replace the Nintendo Wii Motion Plus
 | [`third_party/anemoia-esp32/`](third_party/anemoia-esp32/) | Forked Anemoia source (`motion-pro` branch) |
 
 Hardware pin plan: [`motion_pro_pinout.md`](motion_pro_pinout.md) · [`wii_motion_pro_prototype_wiring.md`](wii_motion_pro_prototype_wiring.md)
+
+
+Low Poly wiimote made here, high poly from https://sketchfab.com/3d-models/wii-controller-64ba1d9a275f4895a0bbafcf8475ffb2, credt to Twisty_z!
+Downscaled with 3daistudio
