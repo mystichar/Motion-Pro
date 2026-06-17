@@ -30,11 +30,14 @@ struct AxisMap {
   const char* label;
 };
 
-// Default mount: IMU -X → controller bottom (-Y), IMU +Y → controller left (-X),
-// IMU +Z → controller front (+Z).  Model vector = (-imu_y, imu_x, imu_z).
+// IMU +X → front (+Z), +Y → left (-X), +Z → top (+Y).  Model = (-imu_y, imu_z, imu_x).
+constexpr AxisMap kVectorMap = {1, 2, 0, -1, 1, 1, "-Y Z X"};
+
 constexpr uint8_t kDefaultAxisMapIndex = 0;
 
 constexpr AxisMap kAxisMaps[] = {
+    {1, 2, 0, -1, 1, 1, "-Y Z X"},
+    {2, 0, 1, 1, 1, -1, "Z X -Y"},
     {1, 0, 2, -1, 1, 1, "-Y X Z"},
     {0, 1, 2, 1, 1, 1, "XYZ"},
     {0, 1, 2, -1, 1, 1, "-X Y Z"},
@@ -159,6 +162,35 @@ inline Quat quatFrontUprightOnScreen(Vec3 upHint) {
                            upHint.z, kForward.z);
 }
 
+inline Quat quatFromTo(Vec3 from, Vec3 to) {
+  from = vec3Normalize(from);
+  to = vec3Normalize(to);
+  const float dot = from.x * to.x + from.y * to.y + from.z * to.z;
+  if (dot > 0.9999f) {
+    return quatIdentity();
+  }
+  if (dot < -0.9999f) {
+    Vec3 axis = {1.0f, 0.0f, 0.0f};
+    if (fabsf(from.x) > 0.9f) {
+      axis = {0.0f, 1.0f, 0.0f};
+    }
+    return quatFromAxisAngle(axis, PI);
+  }
+  const Vec3 cross = {
+      from.y * to.z - from.z * to.y,
+      from.z * to.x - from.x * to.z,
+      from.x * to.y - from.y * to.x,
+  };
+  return quatNormalize({1.0f + dot, cross.x, cross.y, cross.z});
+}
+
+// Gyro delta (from recenter) composed with live gravity tilt in a fixed Y-up world.
+inline Quat wiimoteWorldOrientation(const Quat& qGyro, Vec3 gravityUp) {
+  constexpr Vec3 kWorldUp = {0.0f, 1.0f, 0.0f};
+  const Quat qTilt = quatFromTo(vec3Normalize(gravityUp), kWorldUp);
+  return quatMultiply(qTilt, qGyro);
+}
+
 inline Vec3 remapSensorAxes(float x, float y, float z, const AxisMap& map) {
   const float in[3] = {x, y, z};
   const uint8_t rollIn = map.rollIn % 3;
@@ -169,6 +201,10 @@ inline Vec3 remapSensorAxes(float x, float y, float z, const AxisMap& map) {
       in[pitchIn] * map.pitchSign,
       in[yawIn] * map.yawSign,
   };
+}
+
+inline Vec3 remapSensorVector(float x, float y, float z) {
+  return remapSensorAxes(x, y, z, kVectorMap);
 }
 
 class Tracker {
@@ -217,10 +253,9 @@ class Tracker {
     qIntegrated_ = quatNormalize(qIntegrated_);
   }
 
-  void recenterViewUpright(float axMilliG, float ayMilliG, float azMilliG) {
-    const Vec3 upHint = remapSensorAxes(axMilliG, ayMilliG, azMilliG, kAxisMaps[mapIndex_]);
-    const Quat qTarget = quatFrontUprightOnScreen(upHint);
-    qOffset_ = quatMultiply(qTarget, quatConjugate(qIntegrated_));
+  void recenterViewUpright() {
+    // Current physical pose becomes identity in the fixed world frame.
+    qOffset_ = quatConjugate(qIntegrated_);
   }
 
   Quat orientation() const {
@@ -247,7 +282,7 @@ class GravityReference {
     lastUs_ = micros();
   }
 
-  void updateAccel(float axMilliG, float ayMilliG, float azMilliG, const AxisMap& map) {
+  void updateAccel(float axMilliG, float ayMilliG, float azMilliG) {
     const uint32_t nowUs = micros();
     float dt = (nowUs - lastUs_) * 1e-6f;
     lastUs_ = nowUs;
@@ -255,7 +290,7 @@ class GravityReference {
       dt = 0.033f;
     }
 
-    const Vec3 raw = remapSensorAxes(axMilliG, ayMilliG, azMilliG, map);
+    const Vec3 raw = remapSensorVector(axMilliG, ayMilliG, azMilliG);
     const float len = sqrtf(raw.x * raw.x + raw.y * raw.y + raw.z * raw.z);
     if (len < 50.0f) {
       return;

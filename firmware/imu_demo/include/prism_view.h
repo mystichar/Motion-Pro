@@ -5,12 +5,14 @@
 #include <math.h>
 
 #include "orientation.h"
-#include "wiimote_textures.h"
+#include "wiimote_mesh.h"
 
-// Wiimote-shaped box: 9 (X) x 8 (Y) x 36 (Z) — matches assets/*.png aspect ratios.
-// Renders to an off-screen buffer each frame, then blits once (no partial-frame flicker).
+// Wiimote mesh from assets/*.glb (see scripts/embed_glb.py). Renders to an off-screen buffer
+// each frame, then blits once (no partial-frame flicker).
 
 namespace prism {
+
+enum class SceneViewMode : uint8_t { GroundFixed, WiimoteFixed };
 
 struct Vec3 {
   float x;
@@ -24,51 +26,139 @@ struct Projected {
   float z;
 };
 
-constexpr float kHalfWidth = 4.5f;
-constexpr float kHalfHeight = 4.0f;
-constexpr float kHalfDepth = 18.0f;
-
 constexpr float kScale = 3.0f;
 
-constexpr Vec3 kBaseVerts[8] = {
-    {-kHalfWidth, -kHalfHeight, -kHalfDepth},
-    {kHalfWidth, -kHalfHeight, -kHalfDepth},
-    {kHalfWidth, kHalfHeight, -kHalfDepth},
-    {-kHalfWidth, kHalfHeight, -kHalfDepth},
-    {-kHalfWidth, -kHalfHeight, kHalfDepth},
-    {kHalfWidth, -kHalfHeight, kHalfDepth},
-    {kHalfWidth, kHalfHeight, kHalfDepth},
-    {-kHalfWidth, kHalfHeight, kHalfDepth},
+// Ground view: isometric camera (equal offset on X, Y, Z). Wiimote view: top head-on.
+constexpr float kCamDistance = 95.0f;
+constexpr float kIsoInvSqrt3 = 0.57735026919f;
+constexpr float kTopCamDistance = 72.0f;
+constexpr float kLookAtY = 5.0f;
+constexpr float kWiimoteHoverY = 14.0f;
+
+struct ViewFrame {
+  orient::Vec3 right;
+  orient::Vec3 up;
+  orient::Vec3 forward;
+  orient::Vec3 lookAt;
 };
 
-struct Face {
-  uint8_t i0;
-  uint8_t i1;
-  uint8_t i2;
-  uint8_t i3;
-  WiimoteFaceTex texture;
-  float u0;
-  float v0;
-  float u1;
-  float v1;
-  float u2;
-  float v2;
-  float u3;
-  float v3;
-};
+inline float vec3Dot(orient::Vec3 a, orient::Vec3 b) {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
 
-constexpr Face kFaces[6] = {
-    // +Z front — u left→right, v bottom→top (matches PNG orientation)
-    {4, 5, 6, 7, WiimoteFaceTex::Front, 0, 1, 1, 1, 1, 0, 0, 0},
-    // -Z back — rotated 180° so D-pad / labels match front
-    {1, 0, 3, 2, WiimoteFaceTex::Back, 1, 0, 0, 0, 0, 1, 1, 1},
-    {5, 1, 2, 6, WiimoteFaceTex::None, 0, 0, 0, 0, 0, 0, 0, 0},
-    {0, 4, 7, 3, WiimoteFaceTex::None, 0, 0, 0, 0, 0, 0, 0, 0},
-    // +Y top — long edge runs front (+Z) to back (-Z)
-    {7, 6, 2, 3, WiimoteFaceTex::Top, 0, 0, 1, 0, 1, 1, 0, 1},
-    // -Y bottom — flipped v so underside reads correctly vs front
-    {0, 1, 5, 4, WiimoteFaceTex::Bottom, 0, 1, 1, 1, 1, 0, 0, 0},
-};
+inline orient::Vec3 vec3Sub(orient::Vec3 a, orient::Vec3 b) {
+  return {a.x - b.x, a.y - b.y, a.z - b.z};
+}
+
+inline orient::Vec3 vec3Cross(orient::Vec3 a, orient::Vec3 b) {
+  return {
+      a.y * b.z - a.z * b.y,
+      a.z * b.x - a.x * b.z,
+      a.x * b.y - a.y * b.x,
+  };
+}
+
+inline orient::Vec3 vec3Scale(orient::Vec3 v, float s) {
+  return {v.x * s, v.y * s, v.z * s};
+}
+
+inline orient::Vec3 vec3Add(orient::Vec3 a, orient::Vec3 b) {
+  return {a.x + b.x, a.y + b.y, a.z + b.z};
+}
+
+inline ViewFrame buildViewFrame(orient::Vec3 camPos, orient::Vec3 lookAt,
+                                orient::Vec3 worldUpHint) {
+  ViewFrame frame{};
+  frame.lookAt = lookAt;
+
+  orient::Vec3 toCam = vec3Sub(camPos, lookAt);
+  const float toCamLen = sqrtf(vec3Dot(toCam, toCam));
+  if (toCamLen > 0.0001f) {
+    frame.forward = vec3Scale(toCam, 1.0f / toCamLen);
+  } else {
+    frame.forward = {0.0f, 0.0f, 1.0f};
+  }
+
+  orient::Vec3 right = vec3Cross(frame.forward, worldUpHint);
+  float rightLen = sqrtf(vec3Dot(right, right));
+  if (rightLen < 0.05f) {
+    right = {1.0f, 0.0f, 0.0f};
+    rightLen = 1.0f;
+  }
+  frame.right = vec3Scale(right, 1.0f / rightLen);
+  frame.up = vec3Cross(frame.right, frame.forward);
+  return frame;
+}
+
+inline ViewFrame makeIsometricCamera() {
+  const orient::Vec3 lookAt = {0.0f, kLookAtY, 0.0f};
+  const float d = kCamDistance * kIsoInvSqrt3;
+  const orient::Vec3 camPos = {d, kLookAtY + d, d};
+  constexpr orient::Vec3 kWorldUp = {0.0f, 1.0f, 0.0f};
+  return buildViewFrame(camPos, lookAt, kWorldUp);
+}
+
+// Top texture head-on: +Y toward viewer, IMU +Y (left) toward screen left, IMU +X (front) up.
+inline ViewFrame makeTopOnCamera() {
+  const orient::Vec3 lookAt = {0.0f, kWiimoteHoverY, 0.0f};
+  const orient::Vec3 camPos = {0.0f, kWiimoteHoverY + kTopCamDistance, 0.0f};
+  constexpr orient::Vec3 kFrontUpHint = {0.0f, 0.0f, 1.0f};
+  return buildViewFrame(camPos, lookAt, kFrontUpHint);
+}
+
+inline ViewFrame makeCameraForMode(SceneViewMode mode) {
+  return (mode == SceneViewMode::WiimoteFixed) ? makeTopOnCamera() : makeIsometricCamera();
+}
+
+inline Vec3 worldToView(const ViewFrame& frame, orient::Vec3 world) {
+  const orient::Vec3 rel = vec3Sub(world, frame.lookAt);
+  return {
+      vec3Dot(rel, frame.right),
+      vec3Dot(rel, frame.up),
+      vec3Dot(rel, frame.forward),
+  };
+}
+
+inline Projected projectViewPoint(int screenW, int screenH, const Vec3& view) {
+  return {
+      (int16_t)(screenW / 2 + view.x * kScale),
+      (int16_t)(screenH / 2 - view.y * kScale),
+      view.z,
+  };
+}
+
+inline orient::Vec3 modelPointToWorld(const orient::Quat& qWorld, orient::Vec3 modelPoint) {
+  const orient::Vec3 rotated = orient::quatRotate(qWorld, modelPoint);
+  return {rotated.x, kWiimoteHoverY + rotated.y, rotated.z};
+}
+
+inline orient::Vec3 normalModelToWorld(const orient::Quat& qWorld, const Vec3& modelNormal) {
+  const orient::Vec3 n = orient::quatRotate(qWorld, {modelNormal.x, modelNormal.y, modelNormal.z});
+  return n;
+}
+
+inline orient::Vec3 normalWorldToView(const ViewFrame& frame, orient::Vec3 worldNormal) {
+  return {
+      vec3Dot(worldNormal, frame.right),
+      vec3Dot(worldNormal, frame.up),
+      vec3Dot(worldNormal, frame.forward),
+  };
+}
+
+inline Vec3 meshModelVertex(uint16_t index) {
+  const uint32_t base = (uint32_t)index * 3u;
+  return {
+      pgm_read_float(&kMeshPos[base]),
+      pgm_read_float(&kMeshPos[base + 1u]),
+      pgm_read_float(&kMeshPos[base + 2u]),
+  };
+}
+
+inline void meshModelUv(uint16_t index, float& u, float& v) {
+  const uint32_t base = (uint32_t)index * 2u;
+  u = pgm_read_word(&kMeshUV[base]) / 65535.0f;
+  v = pgm_read_word(&kMeshUV[base + 1u]) / 65535.0f;
+}
 
 constexpr float kLightX = 0.35f;
 constexpr float kLightY = 0.65f;
@@ -80,74 +170,35 @@ constexpr uint8_t kGroundDivisions = 8;
 constexpr uint16_t kGroundLineColor = 0x0320;
 constexpr uint16_t kGroundEdgeColor = 0x04E0;
 
-inline Projected projectPoint(int screenW, int screenH, const Vec3& v) {
-  return {
-      (int16_t)(screenW / 2 + v.x * kScale),
-      (int16_t)(screenH / 2 - v.y * kScale),
-      v.z,
-  };
-}
-
 inline void groundTangentAxes(const orient::Vec3& upIn, orient::Vec3& outRight,
                               orient::Vec3& outForward) {
   orient::Vec3 up = orient::vec3Normalize(upIn);
   orient::Vec3 ref = {0.0f, 0.0f, 1.0f};
-  orient::Vec3 right = {
-      up.y * ref.z - up.z * ref.y,
-      up.z * ref.x - up.x * ref.z,
-      up.x * ref.y - up.y * ref.x,
-  };
-  float rightLen = sqrtf(right.x * right.x + right.y * right.y + right.z * right.z);
+  orient::Vec3 right = vec3Cross(up, ref);
+  float rightLen = sqrtf(vec3Dot(right, right));
   if (rightLen < 0.05f) {
     ref = {1.0f, 0.0f, 0.0f};
-    right = {
-        up.y * ref.z - up.z * ref.y,
-        up.z * ref.x - up.x * ref.z,
-        up.x * ref.y - up.y * ref.x,
-    };
-    rightLen = sqrtf(right.x * right.x + right.y * right.y + right.z * right.z);
+    right = vec3Cross(up, ref);
+    rightLen = sqrtf(vec3Dot(right, right));
   }
   if (rightLen > 0.0001f) {
-    right.x /= rightLen;
-    right.y /= rightLen;
-    right.z /= rightLen;
+    outRight = vec3Scale(right, 1.0f / rightLen);
   } else {
-    right = {1.0f, 0.0f, 0.0f};
+    outRight = {1.0f, 0.0f, 0.0f};
   }
 
-  orient::Vec3 forward = {
-      right.y * up.z - right.z * up.y,
-      right.z * up.x - right.x * up.z,
-      right.x * up.y - right.y * up.x,
-  };
-  outRight = {right.x, right.y, right.z};
-  outForward = {forward.x, forward.y, forward.z};
+  const orient::Vec3 forward = vec3Cross(outRight, up);
+  outForward = forward;
 }
 
-inline void drawGroundPlane(GFXcanvas16& canvas, int screenW, int screenH,
-                            const orient::Vec3& gravityUp) {
-  orient::Vec3 right{};
-  orient::Vec3 forward{};
-  groundTangentAxes(gravityUp, right, forward);
-
-  const orient::Vec3 up = orient::vec3Normalize(gravityUp);
-  const orient::Vec3 center = {
-      -up.x * kGroundDrop,
-      -up.y * kGroundDrop,
-      -up.z * kGroundDrop,
-  };
-
+inline void drawGroundPlaneFlat(GFXcanvas16& canvas, int screenW, int screenH, const ViewFrame& camera) {
   Projected grid[kGroundDivisions + 1][kGroundDivisions + 1];
   for (uint8_t i = 0; i <= kGroundDivisions; ++i) {
     const float u = ((float)i / (float)kGroundDivisions) * 2.0f - 1.0f;
     for (uint8_t j = 0; j <= kGroundDivisions; ++j) {
       const float v = ((float)j / (float)kGroundDivisions) * 2.0f - 1.0f;
-      const Vec3 p = {
-          center.x + (right.x * u + forward.x * v) * kGroundHalfExtent,
-          center.y + (right.y * u + forward.y * v) * kGroundHalfExtent,
-          center.z + (right.z * u + forward.z * v) * kGroundHalfExtent,
-      };
-      grid[i][j] = projectPoint(screenW, screenH, p);
+      const orient::Vec3 world = {u * kGroundHalfExtent, 0.0f, v * kGroundHalfExtent};
+      grid[i][j] = projectViewPoint(screenW, screenH, worldToView(camera, world));
     }
   }
 
@@ -171,10 +222,57 @@ inline void drawGroundPlane(GFXcanvas16& canvas, int screenW, int screenH,
   }
 }
 
-inline Vec3 rotateByQuat(const orient::Quat& q, const Vec3& v) {
-  const orient::Vec3 in = {v.x, v.y, v.z};
-  const orient::Vec3 out = orient::quatRotate(q, in);
-  return {out.x, out.y, out.z};
+inline void drawGroundPlaneGravity(GFXcanvas16& canvas, int screenW, int screenH,
+                                   const ViewFrame& camera, const orient::Vec3& gravityUp) {
+  orient::Vec3 right{};
+  orient::Vec3 forward{};
+  groundTangentAxes(gravityUp, right, forward);
+  const orient::Vec3 up = orient::vec3Normalize(gravityUp);
+  const orient::Vec3 wiimotePos = {0.0f, kWiimoteHoverY, 0.0f};
+  const orient::Vec3 center = vec3Sub(wiimotePos, vec3Scale(up, kGroundDrop));
+
+  Projected grid[kGroundDivisions + 1][kGroundDivisions + 1];
+  for (uint8_t i = 0; i <= kGroundDivisions; ++i) {
+    const float u = ((float)i / (float)kGroundDivisions) * 2.0f - 1.0f;
+    for (uint8_t j = 0; j <= kGroundDivisions; ++j) {
+      const float v = ((float)j / (float)kGroundDivisions) * 2.0f - 1.0f;
+      const orient::Vec3 world = vec3Add(
+          center, vec3Add(vec3Scale(right, u * kGroundHalfExtent),
+                          vec3Scale(forward, v * kGroundHalfExtent)));
+      grid[i][j] = projectViewPoint(screenW, screenH, worldToView(camera, world));
+    }
+  }
+
+  for (uint8_t i = 0; i <= kGroundDivisions; ++i) {
+    for (uint8_t j = 0; j < kGroundDivisions; ++j) {
+      const uint16_t color =
+          (i == 0 || i == kGroundDivisions || j == 0 || j == kGroundDivisions - 1)
+              ? kGroundEdgeColor
+              : kGroundLineColor;
+      canvas.drawLine(grid[i][j].x, grid[i][j].y, grid[i][j + 1].x, grid[i][j + 1].y, color);
+    }
+  }
+  for (uint8_t j = 0; j <= kGroundDivisions; ++j) {
+    for (uint8_t i = 0; i < kGroundDivisions; ++i) {
+      const uint16_t color =
+          (i == 0 || i == kGroundDivisions - 1 || j == 0 || j == kGroundDivisions)
+              ? kGroundEdgeColor
+              : kGroundLineColor;
+      canvas.drawLine(grid[i][j].x, grid[i][j].y, grid[i + 1][j].x, grid[i + 1][j].y, color);
+    }
+  }
+}
+
+inline void drawModeLabel(GFXcanvas16& canvas, SceneViewMode mode) {
+  canvas.setTextColor(ST77XX_WHITE);
+  canvas.setTextSize(1);
+  canvas.fillRect(0, 0, 72, 10, ST77XX_BLACK);
+  canvas.setCursor(4, 2);
+  if (mode == SceneViewMode::GroundFixed) {
+    canvas.print(F("Ground view"));
+  } else {
+    canvas.print(F("Wiimote view"));
+  }
 }
 
 inline Vec3 faceNormal(const Vec3& a, const Vec3& b, const Vec3& c) {
@@ -218,16 +316,14 @@ inline uint16_t shadeRgb565(uint16_t color, float brightness) {
   return (r << 11) | (g << 5) | b;
 }
 
-inline float minFaceZ(const Projected& p0, const Projected& p1, const Projected& p2,
-                      const Projected& p3) {
+inline float minTriZ(const Projected& p0, const Projected& p1, const Projected& p2) {
   float z = p0.z;
   if (p1.z < z) z = p1.z;
   if (p2.z < z) z = p2.z;
-  if (p3.z < z) z = p3.z;
   return z;
 }
 
-inline uint16_t sampleTexture(const WiimoteTexture& tex, float u, float v) {
+inline uint16_t sampleTexture(const WiimoteMeshTexture& tex, float u, float v) {
   if (!tex.data || tex.width == 0 || tex.height == 0) {
     return ST77XX_WHITE;
   }
@@ -245,7 +341,7 @@ inline void drawSolidTriangle(GFXcanvas16& canvas, int x0, int y0, int x1, int y
 
 inline void drawTexturedTriangle(GFXcanvas16& canvas, int x0, int y0, float u0, float v0, int x1,
                                  int y1, float u1, float v1, int x2, int y2, float u2, float v2,
-                                 const WiimoteTexture& tex, float lighting) {
+                                 const WiimoteMeshTexture& tex, float lighting) {
   if (!tex.data) {
     return;
   }
@@ -291,25 +387,8 @@ inline void drawTexturedTriangle(GFXcanvas16& canvas, int x0, int y0, float u0, 
   }
 }
 
-inline void drawFace(GFXcanvas16& canvas, const Face& face, const Projected& p0,
-                     const Projected& p1, const Projected& p2, const Projected& p3,
-                     float lighting) {
-  if (face.texture == WiimoteFaceTex::None) {
-    const uint16_t color = shadedWhite(lighting);
-    drawSolidTriangle(canvas, p0.x, p0.y, p1.x, p1.y, p2.x, p2.y, color);
-    drawSolidTriangle(canvas, p0.x, p0.y, p2.x, p2.y, p3.x, p3.y, color);
-    return;
-  }
-
-  const WiimoteTexture tex = wiimoteTextureFor(face.texture);
-  drawTexturedTriangle(canvas, p0.x, p0.y, face.u0, face.v0, p1.x, p1.y, face.u1, face.v1, p2.x,
-                       p2.y, face.u2, face.v2, tex, lighting);
-  drawTexturedTriangle(canvas, p0.x, p0.y, face.u0, face.v0, p2.x, p2.y, face.u2, face.v2, p3.x,
-                       p3.y, face.u3, face.v3, tex, lighting);
-}
-
-struct FaceDraw {
-  uint8_t index;
+struct TriDraw {
+  uint16_t index;
   float sortZ;
 };
 
@@ -318,41 +397,53 @@ inline GFXcanvas16& frameBuffer() {
   return canvas;
 }
 
-inline void drawPrism(Adafruit_ST7789& tft, int screenW, int screenH, const orient::Quat& orientation,
-                      const orient::Vec3& gravityUp) {
+inline void drawPrism(Adafruit_ST7789& tft, int screenW, int screenH, SceneViewMode mode,
+                      const orient::Quat& qWorldWiimote, const orient::Vec3& gravityUp) {
   GFXcanvas16& canvas = frameBuffer();
   if (screenW != canvas.width() || screenH != canvas.height()) {
     return;
   }
 
-  Vec3 world[8];
-  Projected projected[8];
-  for (uint8_t i = 0; i < 8; ++i) {
-    const Vec3 v = rotateByQuat(orientation, kBaseVerts[i]);
-    world[i] = v;
-    projected[i] = projectPoint(screenW, screenH, v);
-  }
+  const ViewFrame camera = makeCameraForMode(mode);
+  const orient::Quat qDraw =
+      (mode == SceneViewMode::WiimoteFixed) ? orient::quatIdentity() : qWorldWiimote;
 
-  FaceDraw order[6];
-  uint8_t visibleCount = 0;
-  for (uint8_t f = 0; f < 6; ++f) {
-    const Face& face = kFaces[f];
-    const Vec3 normal = faceNormal(world[face.i0], world[face.i1], world[face.i2]);
-    if (normal.z <= 0.0f) {
+  TriDraw order[kMeshTriangleCount];
+  uint16_t visibleCount = 0;
+  for (uint16_t t = 0; t < kMeshTriangleCount; ++t) {
+    const uint32_t idxBase = (uint32_t)t * 3u;
+    const uint16_t i0 = pgm_read_word(&kMeshIndex[idxBase]);
+    const uint16_t i1 = pgm_read_word(&kMeshIndex[idxBase + 1u]);
+    const uint16_t i2 = pgm_read_word(&kMeshIndex[idxBase + 2u]);
+
+    const Vec3 v0 = meshModelVertex(i0);
+    const Vec3 v1 = meshModelVertex(i1);
+    const Vec3 v2 = meshModelVertex(i2);
+    const Vec3 modelNormal = faceNormal(v0, v1, v2);
+    const orient::Vec3 worldNormal =
+        normalModelToWorld(qDraw, {modelNormal.x, modelNormal.y, modelNormal.z});
+    const orient::Vec3 viewNormal = normalWorldToView(camera, worldNormal);
+    if (viewNormal.z <= 0.0f) {
       continue;
     }
 
-    order[visibleCount].index = f;
-    order[visibleCount].sortZ =
-        minFaceZ(projected[face.i0], projected[face.i1], projected[face.i2], projected[face.i3]);
+    const orient::Vec3 w0 = modelPointToWorld(qDraw, {v0.x, v0.y, v0.z});
+    const orient::Vec3 w1 = modelPointToWorld(qDraw, {v1.x, v1.y, v1.z});
+    const orient::Vec3 w2 = modelPointToWorld(qDraw, {v2.x, v2.y, v2.z});
+    const Projected p0 = projectViewPoint(screenW, screenH, worldToView(camera, w0));
+    const Projected p1 = projectViewPoint(screenW, screenH, worldToView(camera, w1));
+    const Projected p2 = projectViewPoint(screenW, screenH, worldToView(camera, w2));
+
+    order[visibleCount].index = t;
+    order[visibleCount].sortZ = minTriZ(p0, p1, p2);
     ++visibleCount;
   }
 
-  for (uint8_t a = 0; a + 1 < visibleCount; ++a) {
-    for (uint8_t b = a + 1; b < visibleCount; ++b) {
+  for (uint16_t a = 0; a + 1 < visibleCount; ++a) {
+    for (uint16_t b = a + 1; b < visibleCount; ++b) {
       if (order[a].sortZ > order[b].sortZ ||
           (order[a].sortZ == order[b].sortZ && order[a].index > order[b].index)) {
-        const FaceDraw tmp = order[a];
+        const TriDraw tmp = order[a];
         order[a] = order[b];
         order[b] = tmp;
       }
@@ -360,23 +451,59 @@ inline void drawPrism(Adafruit_ST7789& tft, int screenW, int screenH, const orie
   }
 
   canvas.fillScreen(ST77XX_BLACK);
-  drawGroundPlane(canvas, screenW, screenH, gravityUp);
-
-  for (uint8_t o = 0; o < visibleCount; ++o) {
-    const Face& face = kFaces[order[o].index];
-    const Vec3 normal = faceNormal(world[face.i0], world[face.i1], world[face.i2]);
-    const float lighting = normal.x * kLightX + normal.y * kLightY + normal.z * kLightZ;
-    drawFace(canvas, face, projected[face.i0], projected[face.i1], projected[face.i2],
-             projected[face.i3], lighting);
+  if (mode == SceneViewMode::GroundFixed) {
+    drawGroundPlaneFlat(canvas, screenW, screenH, camera);
+  } else {
+    drawGroundPlaneGravity(canvas, screenW, screenH, camera, gravityUp);
   }
 
+  for (uint16_t o = 0; o < visibleCount; ++o) {
+    const uint16_t t = order[o].index;
+    const uint32_t idxBase = (uint32_t)t * 3u;
+    const uint16_t i0 = pgm_read_word(&kMeshIndex[idxBase]);
+    const uint16_t i1 = pgm_read_word(&kMeshIndex[idxBase + 1u]);
+    const uint16_t i2 = pgm_read_word(&kMeshIndex[idxBase + 2u]);
+
+    const Vec3 v0 = meshModelVertex(i0);
+    const Vec3 v1 = meshModelVertex(i1);
+    const Vec3 v2 = meshModelVertex(i2);
+    const Vec3 modelNormal = faceNormal(v0, v1, v2);
+    const orient::Vec3 worldNormal =
+        normalModelToWorld(qDraw, {modelNormal.x, modelNormal.y, modelNormal.z});
+    const float lighting = worldNormal.x * kLightX + worldNormal.y * kLightY + worldNormal.z * kLightZ;
+
+    const orient::Vec3 w0 = modelPointToWorld(qDraw, {v0.x, v0.y, v0.z});
+    const orient::Vec3 w1 = modelPointToWorld(qDraw, {v1.x, v1.y, v1.z});
+    const orient::Vec3 w2 = modelPointToWorld(qDraw, {v2.x, v2.y, v2.z});
+    const Projected p0 = projectViewPoint(screenW, screenH, worldToView(camera, w0));
+    const Projected p1 = projectViewPoint(screenW, screenH, worldToView(camera, w1));
+    const Projected p2 = projectViewPoint(screenW, screenH, worldToView(camera, w2));
+
+    float tu0 = 0.0f;
+    float tv0 = 0.0f;
+    float tu1 = 0.0f;
+    float tv1 = 0.0f;
+    float tu2 = 0.0f;
+    float tv2 = 0.0f;
+    meshModelUv(i0, tu0, tv0);
+    meshModelUv(i1, tu1, tv1);
+    meshModelUv(i2, tu2, tv2);
+    drawTexturedTriangle(canvas, p0.x, p0.y, tu0, tv0, p1.x, p1.y, tu1, tv1, p2.x, p2.y, tu2, tv2,
+                         kMeshTexture, lighting);
+  }
+
+  drawModeLabel(canvas, mode);
   tft.drawRGBBitmap(0, 0, canvas.getBuffer(), screenW, screenH);
 }
 
-inline void drawAxisGizmo(GFXcanvas16& canvas, int screenW, int screenH, const orient::Quat& orientation) {
-  const int cx = screenW / 2;
-  const int cy = screenH / 2;
+inline void drawAxisGizmo(GFXcanvas16& canvas, int screenW, int screenH, const ViewFrame& camera,
+                          const orient::Quat& qWorldWiimote) {
   constexpr float kAxisLen = 4.0f;
+  const orient::Vec3 modelCenter = {0.0f, 0.0f, 0.0f};
+  const orient::Vec3 worldCenter = modelPointToWorld(qWorldWiimote, modelCenter);
+  const Vec3 viewCenter = worldToView(camera, worldCenter);
+  const Projected center = projectViewPoint(screenW, screenH, viewCenter);
+
   const orient::Vec3 modelAxes[3] = {
       {kAxisLen, 0.0f, 0.0f},
       {0.0f, kAxisLen, 0.0f},
@@ -386,33 +513,34 @@ inline void drawAxisGizmo(GFXcanvas16& canvas, int screenW, int screenH, const o
   const char labels[3] = {'R', 'P', 'Y'};
 
   for (uint8_t i = 0; i < 3; ++i) {
-    const orient::Vec3 in = modelAxes[i];
-    const orient::Vec3 out = orient::quatRotate(orientation, in);
-    const int x1 = cx + (int)(out.x * kScale);
-    const int y1 = cy - (int)(out.y * kScale);
-    canvas.drawLine(cx, cy, x1, y1, colors[i]);
+    const orient::Vec3 worldTip = modelPointToWorld(qWorldWiimote, modelAxes[i]);
+    const Projected tip = projectViewPoint(screenW, screenH, worldToView(camera, worldTip));
+    canvas.drawLine(center.x, center.y, tip.x, tip.y, colors[i]);
     canvas.setTextColor(colors[i]);
     canvas.setTextSize(1);
-    canvas.setCursor(x1 + 2, y1 - 4);
+    canvas.setCursor(tip.x + 2, tip.y - 4);
     canvas.print(labels[i]);
   }
 }
 
-inline void drawPrismWithOverlay(Adafruit_ST7789& tft, int screenW, int screenH,
-                                 const orient::Quat& orientation, const orient::Vec3& gravityUp,
+inline void drawPrismWithOverlay(Adafruit_ST7789& tft, int screenW, int screenH, SceneViewMode mode,
+                                 const orient::Quat& qWorldWiimote, const orient::Vec3& gravityUp,
                                  bool showAxes, uint8_t axisMapIndex, const char* axisMapLabel) {
-  drawPrism(tft, screenW, screenH, orientation, gravityUp);
+  drawPrism(tft, screenW, screenH, mode, qWorldWiimote, gravityUp);
   if (!showAxes) {
     return;
   }
 
   GFXcanvas16& canvas = frameBuffer();
-  drawAxisGizmo(canvas, screenW, screenH, orientation);
+  const ViewFrame camera = makeCameraForMode(mode);
+  const orient::Quat qDraw =
+      (mode == SceneViewMode::WiimoteFixed) ? orient::quatIdentity() : qWorldWiimote;
+  drawAxisGizmo(canvas, screenW, screenH, camera, qDraw);
 
   canvas.setTextColor(ST77XX_WHITE);
   canvas.setTextSize(1);
-  canvas.fillRect(0, 0, screenW, 10, ST77XX_BLACK);
-  canvas.setCursor(4, 2);
+  canvas.fillRect(0, 12, screenW, 10, ST77XX_BLACK);
+  canvas.setCursor(4, 14);
   canvas.print(F("Map "));
   canvas.print(axisMapIndex);
   canvas.print(F(": "));

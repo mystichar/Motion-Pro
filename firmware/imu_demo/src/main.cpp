@@ -54,6 +54,7 @@ orient::GravityReference gravityReference;
 bool btnIsPressed = false;
 bool btnHoldHandled = false;
 bool prismShowAxes = false;
+prism::SceneViewMode prismViewMode = prism::SceneViewMode::GroundFixed;
 bool pendingSingleTap = false;
 uint32_t btnPressStartMs = 0;
 uint32_t btnLastEdgeMs = 0;
@@ -71,8 +72,10 @@ void setupButton() {
 }
 
 void showPrismView() {
-  prism::drawPrismWithOverlay(tft, LCD_WIDTH, LCD_HEIGHT, orientationTracker.orientation(),
-                              gravityReference.up(), prismShowAxes, orientationTracker.axisMapIndex(),
+  const orient::Quat qWorld =
+      orient::wiimoteWorldOrientation(orientationTracker.orientation(), gravityReference.up());
+  prism::drawPrismWithOverlay(tft, LCD_WIDTH, LCD_HEIGHT, prismViewMode, qWorld, gravityReference.up(),
+                              prismShowAxes, orientationTracker.axisMapIndex(),
                               orientationTracker.axisMapLabel());
 }
 
@@ -102,10 +105,16 @@ void executeSingleTapToggle() {
   }
 }
 
-void recenterPrismView() {
-  orientationTracker.recenterViewUpright(accel.xData, accel.yData, accel.zData);
+void togglePrismViewMode() {
+  prismViewMode = (prismViewMode == prism::SceneViewMode::GroundFixed)
+                      ? prism::SceneViewMode::WiimoteFixed
+                      : prism::SceneViewMode::GroundFixed;
   calFlashUntilMs = millis() + kCalFlashMs;
-  Serial.println(F("View reset: front toward you, upright"));
+  if (prismViewMode == prism::SceneViewMode::GroundFixed) {
+    Serial.println(F("View: ground fixed (wiimote moves)"));
+  } else {
+    Serial.println(F("View: wiimote fixed (ground moves)"));
+  }
 }
 
 void resetGraphHistory() {
@@ -154,7 +163,7 @@ void pollScreenButton() {
   if (pressed && !btnHoldHandled && (now - btnPressStartMs) >= kBtnHoldCalMs) {
     btnHoldHandled = true;
     pendingSingleTap = false;
-    recenterPrismView();
+    togglePrismViewMode();
     if (activeScreen == Screen::Prism3D) {
       showPrismView();
     }
@@ -361,7 +370,7 @@ void setup() {
     orientationTracker.reset();
     gravityReference.reset();
     showImuDashboard();
-    Serial.println(F("IMU OK — tap: toggle | double-tap: axis map | hold: reset view"));
+    Serial.println(F("IMU OK — tap: toggle | double-tap: axis map | hold: switch view"));
   } else {
     drawErrorScreen();
     Serial.println(F("IMU begin() failed — check wiring"));
@@ -376,7 +385,7 @@ void loop() {
 
   readImu();
   orientationTracker.updateGyro(gyro.xData, gyro.yData, gyro.zData);
-  gravityReference.updateAccel(accel.xData, accel.yData, accel.zData, orientationTracker.axisMap());
+  gravityReference.updateAccel(accel.xData, accel.yData, accel.zData);
   pollScreenButton();
 
   if (activeScreen == Screen::ImuDashboard) {
