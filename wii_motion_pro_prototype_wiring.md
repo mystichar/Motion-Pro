@@ -157,7 +157,7 @@ These GPIO assignments match `firmware/screen_demo/include/display_pins.h` and t
 | `VCC` | — | **3.3 V** | Module power. |
 | `GND` | — | **GND** | Common ground. |
 
-GPIOs still free on the 0–13 header after LCD wiring: **2, 3, 12, 13**. Reserve **GPIO 10 / 11** for future IMU I2C (`IMU_SCL` / `IMU_SDA`).
+Wii harness uses left-header **GPIO 1 / 2 / 3** (`WII_SDA` / `WII_SCL` / `WII_SENSE`). IMU I2C uses **GPIO 10 / 11**. Screen-select button on **GPIO 12** (`BTN_GPIO`). Optional microSD MISO on **GPIO 13**. See [`motion_pro_pinout.md`](motion_pro_pinout.md).
 
 ### Remaining peripherals (not yet assigned)
 
@@ -165,12 +165,10 @@ GPIOs still free on the 0–13 header after LCD wiring: **2, 3, 12, 13**. Reserv
 |---|---|---|---|
 | IMU SDA | `IMU_SDA` | Internal I2C SDA | Qwiic bus; suggested GPIO 11. |
 | IMU SCL | `IMU_SCL` | Internal I2C SCL | Qwiic bus; suggested GPIO 10. |
-| Wii SDA | `WII_SDA` | Dedicated GPIO | Do not share with IMU. |
-| Wii SCL | `WII_SCL` | Dedicated GPIO | Do not share with IMU. |
-| Wii Sense | `WII_SENSE` | GPIO input/output via resistor | Determine behavior experimentally. |
-| Cal button | `BTN_CAL` | Input with pull-up | Optional. |
-| Mode button | `BTN_MODE` | Input with pull-up | Optional. |
-| Save/center button | `BTN_SAVE` | Input with pull-up | Optional. |
+| Wii SDA | `WII_SDA` | **GPIO 1** | Left header; dedicated `Wire1` SDA. Not used in firmware yet. |
+| Wii SCL | `WII_SCL` | **GPIO 2** | Left header; dedicated `Wire1` SCL. |
+| Wii Sense | `WII_SENSE` | **GPIO 3** | Left header; TRIG_S / accessory detect input. |
+| Screen-select button | `BTN_GPIO` | **GPIO 12** | Right header; toggles IMU dashboard / 3D prism view. |
 
 ### Pin map template (remaining peripherals)
 
@@ -184,16 +182,14 @@ LCD_DC    = GPIO4    ; confirmed
 LCD_RST   = GPIO8    ; confirmed
 LCD_BL    = GPIO9    ; confirmed (Mini header; Waveshare ref. uses GPIO15)
 
-IMU_SDA   = GPIO__   ; suggested: GPIO11
-IMU_SCL   = GPIO__   ; suggested: GPIO10
+IMU_SDA   = GPIO11   ; Qwiic blue
+IMU_SCL   = GPIO10   ; Qwiic yellow
 
-WII_SDA   = GPIO__
-WII_SCL   = GPIO__
-WII_SENSE = GPIO__
+WII_SDA   = GPIO1     ; gray — reserved, not in firmware yet
+WII_SCL   = GPIO2     ; white (SCL_S)
+WII_SENSE = GPIO3     ; black (TRIG_S)
 
-BTN_CAL   = GPIO__
-BTN_MODE  = GPIO__
-BTN_SAVE  = GPIO__
+BTN_GPIO  = GPIO12    ; screen select, right header
 ```
 
 ---
@@ -207,7 +203,7 @@ flowchart LR
     WII[Wiimote Extension Connector] -->|SDA/SCL/Sense| ESP[ESP32-S3 Mini]
     ESP -->|SPI: DIN/CLK/CS/DC/RST/BL| LCD[240 x 280 SPI LCD]
     ESP -->|Qwiic I2C: SDA/SCL| IMU[SparkFun Micro ISM330DHCX]
-    ESP -->|GPIO inputs| BTN[Cal / Mode / Save Buttons]
+    ESP -->|GPIO12 input| BTN[Screen Select Button]
     USB[USB Power / Debug] --> ESP
     ESP --- GND[(Common Ground)]
     WII --- GND
@@ -222,9 +218,9 @@ flowchart LR
 | Wii connector wire | Label | Connect to | Notes |
 |---|---|---|---|
 | Red | `GND` | ESP32 `GND` | Required common ground. |
-| Gray | `SDA` | `WII_SDA` GPIO | Dedicated Wii-side data line. |
-| White | `SCL_S` | `WII_SCL` GPIO | Dedicated Wii-side clock line. |
-| Black | `TRIG_S` | `WII_SENSE` GPIO through resistor or test pad | Verify with meter before driving. |
+| Gray | `SDA` | `WII_SDA` **GPIO 1** | Left header; series resistor 100–330 Ω. |
+| White | `SCL_S` | `WII_SCL` **GPIO 2** | Left header; series resistor 100–330 Ω. |
+| Black | `TRIG_S` | `WII_SENSE` **GPIO 3** | Left header; 1–10 kΩ series during experiments. |
 | Blue | `+3.3V` | Test pad / optional voltage sense | Do not power ESP32+LCD from this initially. |
 
 Suggested protection on the Wii-side lines:
@@ -260,8 +256,8 @@ Using Qwiic:
 |---|---|---|
 | 3.3 V | ESP32 3.3 V | SparkFun board supply is in the 1.71 V to 3.6 V range. |
 | GND | GND | Common ground. |
-| SDA | `IMU_SDA` | Internal I2C bus only. |
-| SCL | `IMU_SCL` | Internal I2C bus only. |
+| SDA (blue) | `IMU_SDA` **GPIO 11** | Internal I2C bus only. |
+| SCL (yellow) | `IMU_SCL` **GPIO 10** | Internal I2C bus only. |
 
 If you use a Qwiic cable, verify the ESP32-side connector pinout before soldering. Qwiic is nominally 3.3 V I2C.
 

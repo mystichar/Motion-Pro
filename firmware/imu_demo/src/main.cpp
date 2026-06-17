@@ -7,12 +7,19 @@
 
 #include "display_pins.h"
 #include "imu_pins.h"
+#include "button_pins.h"
+#include "prism_view.h"
 
 namespace {
 
 constexpr uint32_t kRefreshMs = 50;
+constexpr uint32_t kBtnDebounceMs = 50;
+constexpr uint32_t kPrismRefreshMs = 33;
+constexpr float kPrismRotSpeed = 0.55f;
 constexpr uint16_t kHeaderColor = 0x0010;
 constexpr uint16_t kGridColor = 0x4208;
+
+enum class Screen : uint8_t { ImuDashboard, Prism3D };
 
 constexpr int kGraphX = 4;
 constexpr int kGraphY = 108;
@@ -38,6 +45,57 @@ constexpr int kCanvasH = kGraphH - 2;
 GFXcanvas16 graphCanvas(kCanvasW, kCanvasH);
 
 bool imuOk = false;
+Screen activeScreen = Screen::ImuDashboard;
+bool btnWasPressed = false;
+uint32_t btnLastChangeMs = 0;
+
+void drawStaticChrome();
+
+void setupButton() {
+  pinMode(BTN_GPIO, INPUT_PULLUP);
+}
+
+void showPrismView() {
+  prism::drawRotatingPrism(tft, LCD_WIDTH, LCD_HEIGHT, 0.0f);
+}
+
+void resetGraphHistory() {
+  graphHead = 0;
+  graphSampleCount = 0;
+  memset(gyroXHist, 0, sizeof(gyroXHist));
+  memset(gyroYHist, 0, sizeof(gyroYHist));
+  memset(gyroZHist, 0, sizeof(gyroZHist));
+  graphCanvas.fillScreen(ST77XX_BLACK);
+}
+
+void showImuDashboard() {
+  drawStaticChrome();
+  resetGraphHistory();
+}
+
+void pollScreenButton() {
+  const bool pressed = digitalRead(BTN_GPIO) == LOW;
+  const uint32_t now = millis();
+  if (pressed == btnWasPressed || (now - btnLastChangeMs) < kBtnDebounceMs) {
+    return;
+  }
+
+  btnLastChangeMs = now;
+  btnWasPressed = pressed;
+  if (!pressed) {
+    return;
+  }
+
+  if (activeScreen == Screen::ImuDashboard) {
+    activeScreen = Screen::Prism3D;
+    showPrismView();
+    Serial.println(F("Screen: 3D prism"));
+  } else {
+    activeScreen = Screen::ImuDashboard;
+    showImuDashboard();
+    Serial.println(F("Screen: IMU dashboard"));
+  }
+}
 
 void setupBacklight() {
 #if LCD_BL_USE_PWM
@@ -228,6 +286,7 @@ void setup() {
   delay(500);
 
   setupBacklight();
+  setupButton();
   SPI.begin(LCD_SCK, -1, LCD_MOSI, LCD_CS);
   tft.init(LCD_WIDTH, LCD_HEIGHT, SPI_MODE0);
   tft.setSPISpeed(LCD_SPI_HZ);
@@ -235,9 +294,8 @@ void setup() {
 
   imuOk = initImu();
   if (imuOk) {
-    drawStaticChrome();
-    graphCanvas.fillScreen(ST77XX_BLACK);
-    Serial.println(F("IMU OK — gyro graph in milli-dps"));
+    showImuDashboard();
+    Serial.println(F("IMU OK — GPIO12 toggles IMU / 3D prism"));
   } else {
     drawErrorScreen();
     Serial.println(F("IMU begin() failed — check wiring"));
@@ -251,12 +309,19 @@ void loop() {
   }
 
   readImu();
-  pushGyroSample();
-  drawGyroGraph();
-  drawReadings();
+  pollScreenButton();
 
-  Serial.printf("A  X:%8.1f  Y:%8.1f  Z:%8.1f  |  G  X:%8.1f  Y:%8.1f  Z:%8.1f\n",
-                accel.xData, accel.yData, accel.zData, gyro.xData, gyro.yData, gyro.zData);
+  if (activeScreen == Screen::ImuDashboard) {
+    pushGyroSample();
+    drawGyroGraph();
+    drawReadings();
 
-  delay(kRefreshMs);
+    Serial.printf("A  X:%8.1f  Y:%8.1f  Z:%8.1f  |  G  X:%8.1f  Y:%8.1f  Z:%8.1f\n",
+                  accel.xData, accel.yData, accel.zData, gyro.xData, gyro.yData, gyro.zData);
+    delay(kRefreshMs);
+  } else {
+    const float angle = millis() * 0.001f * kPrismRotSpeed;
+    prism::drawRotatingPrism(tft, LCD_WIDTH, LCD_HEIGHT, angle);
+    delay(kPrismRefreshMs);
+  }
 }
