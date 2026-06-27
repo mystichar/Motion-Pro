@@ -279,19 +279,72 @@ inline void drawStaticChrome(Adafruit_ST7789& tft) {
   tft.print(F("  Red=GND  Blue=3V3 ref"));
 
   tft.setTextColor(ST77XX_YELLOW);
-  tft.setCursor(4, 68);
+  tft.setCursor(4, 62);
+  tft.println(F("Init sequence (latched)"));
+  tft.setCursor(4, 88);
   tft.println(F("Bus / decode"));
-  tft.setCursor(4, 104);
+  tft.setCursor(4, 124);
   tft.println(F("Last write (raw hex)"));
-  tft.setCursor(4, 142);
+  tft.setCursor(4, 162);
   tft.println(F("Last read (raw hex)"));
   tft.setTextColor(ST77XX_GREEN);
-  tft.setCursor(4, 156);
+  tft.setCursor(4, 176);
   tft.println(F("Recent events"));
 
   tft.setTextColor(0x4208);
   tft.setCursor(4, 268);
   tft.print(F("Tap: cycle screens"));
+}
+
+inline void drawInitStep(Adafruit_ST7789& tft, int x, int y, bool done, const char* label) {
+  tft.setCursor(x, y);
+  tft.setTextColor(done ? ST77XX_GREEN : 0x4208);
+  tft.print(done ? F("[+]") : F("[ ]"));
+  tft.setTextColor(done ? ST77XX_WHITE : 0x4208);
+  tft.print(label);
+}
+
+inline void drawInitProgress(Adafruit_ST7789& tft) {
+  InitProgress prog{};
+  getInitProgress(prog);
+
+  tft.fillRect(4, 74, 232, 24, ST77XX_BLACK);
+  drawInitStep(tft, 4, 74, prog.init_f0, "F0:55");
+  drawInitStep(tft, 58, 74, prog.init_fb, "FB");
+  drawInitStep(tft, 96, 74, prog.id_read, "ID");
+  drawInitStep(tft, 130, 74, prog.activated, "FE");
+  drawInitStep(tft, 174, 74, prog.bank_a4, "A4");
+
+  tft.setCursor(4, 86);
+  tft.setTextColor(ST77XX_CYAN);
+  if (prog.live_polling) {
+    drawInitStep(tft, 4, 86, true, "LIVE@37");
+    tft.setTextColor(ST77XX_CYAN);
+    tft.setCursor(70, 86);
+    if (!prog.init_f0) {
+      tft.print(F("no F0 (skipped?)"));
+    } else if (prog.id_read && prog.last_id_label[0]) {
+      tft.print(F("ID:"));
+      tft.print(prog.last_id_label);
+    } else {
+      tft.print(F("gyro stream OK"));
+    }
+  } else if (prog.id_read && prog.last_id_label[0]) {
+    tft.print(F("ID:"));
+    tft.print(prog.last_id_label);
+    if (prog.id_read_count > 1) {
+      tft.print(F(" rd"));
+      tft.print(prog.id_read_count);
+    }
+  } else if (prog.init_f0) {
+    tft.print(F("Init OK, wait ID@FA"));
+  } else {
+    tft.print(F("Wait boot or F0:55"));
+  }
+  if (prog.activated) {
+    tft.print(F(" FE:"));
+    tft.print(prog.last_fmt_byte, HEX);
+  }
 }
 
 inline void drawDashboard(Adafruit_ST7789& tft) {
@@ -310,11 +363,6 @@ inline void drawDashboard(Adafruit_ST7789& tft) {
   decodeLastWrite(lastWrite, lastWriteLen, writeInfo);
 
   DecodeInfo readInfo{};
-  if (lastReadLen >= kLiveReportLen) {
-    decodeLiveReport(lastRead, readInfo);
-    readInfo.has_mp = true;
-    snprintf(readInfo.op, sizeof(readInfo.op), "MP gyro");
-  }
 
   const bool senseHigh = digitalRead(WII_SENSE) == HIGH;
   const bool sdaHigh = digitalRead(WII_SDA) == HIGH;
@@ -323,9 +371,11 @@ inline void drawDashboard(Adafruit_ST7789& tft) {
   const uint32_t lastAct = lastActivityMs();
   const uint32_t idleMs = lastAct == 0 ? 0 : millis() - lastAct;
 
-  tft.fillRect(4, 80, 232, 18, ST77XX_BLACK);
+  drawInitProgress(tft);
+
+  tft.fillRect(4, 100, 232, 18, ST77XX_BLACK);
   tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(4, 80);
+  tft.setCursor(4, 100);
   if (gScanActive) {
     tft.setTextColor(ST77XX_YELLOW);
     tft.print(F("SCAN 0x"));
@@ -355,9 +405,9 @@ inline void drawDashboard(Adafruit_ST7789& tft) {
     tft.print(F("ms"));
   }
 
-  tft.fillRect(4, 96, 232, 12, ST77XX_BLACK);
+  tft.fillRect(4, 116, 232, 12, ST77XX_BLACK);
   tft.setTextColor(ST77XX_CYAN);
-  tft.setCursor(4, 96);
+  tft.setCursor(4, 116);
   if (writeInfo.op[0]) {
     tft.print(writeInfo.op);
     if (writeInfo.detail[0]) {
@@ -376,33 +426,41 @@ inline void drawDashboard(Adafruit_ST7789& tft) {
   } else {
     line2[0] = '\0';
   }
-  tft.fillRect(4, 116, 232, 24, ST77XX_BLACK);
+  tft.fillRect(4, 136, 232, 24, ST77XX_BLACK);
   tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(4, 116);
+  tft.setCursor(4, 136);
   tft.print(line);
   if (line2[0]) {
-    tft.setCursor(4, 128);
+    tft.setCursor(4, 148);
     tft.print(line2);
   }
 
+  uint8_t mpReport[kLiveReportLen]{};
+  getLastMotionPlusReport(mpReport);
+  DecodeInfo mpInfo{};
+  decodeLiveReport(mpReport, mpInfo);
+
   formatHexLine(lastRead, lastReadLen, line, sizeof(line));
-  if (readInfo.has_mp) {
-    tft.fillRect(4, 154, 232, 12, ST77XX_BLACK);
+  if (lastReadLen >= kLiveReportLen) {
+    decodeLiveReport(lastRead, readInfo);
+    readInfo.has_mp = true;
+  }
+  tft.fillRect(4, 174, 232, 12, ST77XX_BLACK);
+  if (readInfo.has_mp || mpInfo.has_mp) {
     tft.setTextColor(ST77XX_CYAN);
-    tft.setCursor(4, 154);
-    tft.print(readInfo.op);
-    tft.print(F(" "));
-    tft.print(readInfo.detail);
+    tft.setCursor(4, 174);
+    tft.print(F("MP "));
+    tft.print(readInfo.has_mp ? readInfo.detail : mpInfo.detail);
+    tft.print(F(" IMU"));
   } else {
-    tft.fillRect(4, 154, 232, 12, ST77XX_BLACK);
     tft.setTextColor(ST77XX_WHITE);
-    tft.setCursor(4, 154);
+    tft.setCursor(4, 174);
     tft.print(line);
   }
 
-  tft.fillRect(4, 168, 232, 96, ST77XX_BLACK);
+  tft.fillRect(4, 188, 232, 76, ST77XX_BLACK);
   tft.setTextColor(ST77XX_WHITE);
-  int y = 168;
+  int y = 188;
   const uint8_t head = gEventHead;
   const uint8_t shown = head < 6 ? head : 6;
   const uint8_t start = head >= shown ? head - shown : 0;
@@ -418,20 +476,16 @@ inline void drawDashboard(Adafruit_ST7789& tft) {
   }
 
   if (head == 0) {
-    tft.setCursor(4, 168);
+    tft.setCursor(4, 188);
     tft.setTextColor(0x4208);
     if (!gInitialized) {
       tft.println(F("Slave not started:"));
-      tft.setCursor(4, 182);
+      tft.setCursor(4, 202);
       tft.println(F("SDA/SCL must be HIGH"));
-      tft.setCursor(4, 196);
+      tft.setCursor(4, 216);
       tft.println(F("Power ON Wiimote first"));
     } else {
-      tft.println(F("No I2C yet — check wiring:"));
-      tft.setCursor(4, 182);
-      tft.println(F("Gray=SDA White=SCL Black=Sense"));
-      tft.setCursor(4, 196);
-      tft.println(F("Serial 115200 logs raw W/R"));
+      tft.println(F("No I2C yet — check wiring"));
     }
   }
 }

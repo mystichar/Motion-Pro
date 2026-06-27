@@ -64,6 +64,7 @@ uint32_t pendingSingleTapAtMs = 0;
 uint32_t calFlashUntilMs = 0;
 
 void drawStaticChrome();
+void drawImuAbsentReadings();
 void showImuDashboard();
 void executeSingleTapToggle();
 void executeDoubleTap();
@@ -104,6 +105,18 @@ void executeDoubleTap() {
 }
 
 void executeSingleTapToggle() {
+  if (!imuOk) {
+    if (activeScreen == Screen::WiiI2c) {
+      activeScreen = Screen::ImuDashboard;
+      showImuDashboard();
+      Serial.println(F("Screen: IMU dashboard (no sensor)"));
+    } else {
+      activeScreen = Screen::WiiI2c;
+      showWiiI2cView();
+      Serial.println(F("Screen: Wii I2C"));
+    }
+    return;
+  }
   if (activeScreen == Screen::ImuDashboard) {
     activeScreen = Screen::Prism3D;
     showPrismView();
@@ -143,6 +156,9 @@ void resetGraphHistory() {
 void showImuDashboard() {
   drawStaticChrome();
   resetGraphHistory();
+  if (!imuOk) {
+    drawImuAbsentReadings();
+  }
 }
 
 void pollScreenButton() {
@@ -244,24 +260,32 @@ void drawValueBlock(int y, char axis, float value) {
   tft.print(value, 1);
 }
 
-void drawErrorScreen() {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setTextColor(ST77XX_RED);
-  tft.setTextSize(2);
-  tft.setCursor(12, 100);
-  tft.println(F("IMU ERROR"));
+void drawImuAbsentReadings() {
   tft.setTextSize(1);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(4, 140);
-  tft.println(F("Check Qwiic wiring:"));
-  tft.setCursor(4, 156);
-  tft.print(F("Blue  -> GPIO"));
-  tft.println(IMU_SDA);
-  tft.setCursor(4, 172);
-  tft.print(F("Yellow-> GPIO"));
-  tft.println(IMU_SCL);
-  tft.setCursor(4, 196);
-  tft.println(F("Red=3.3V Black=GND"));
+  tft.fillRect(40, 44, LCD_WIDTH - 44, 42, ST77XX_BLACK);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setCursor(4, 44);
+  tft.println(F("X:"));
+  tft.setCursor(4, 58);
+  tft.println(F("Y:"));
+  tft.setCursor(4, 72);
+  tft.println(F("Z:"));
+  tft.setTextColor(kGridColor);
+  tft.setCursor(40, 44);
+  tft.println(F("---"));
+  tft.setCursor(40, 58);
+  tft.println(F("---"));
+  tft.setCursor(40, 72);
+  tft.println(F("---"));
+
+  tft.fillRect(4, 248, LCD_WIDTH - 8, 10, ST77XX_BLACK);
+  tft.setCursor(4, 248);
+  tft.setTextColor(kGridColor);
+  tft.print(F("---  ---  ---"));
+
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setCursor(4, 100);
+  tft.print(F("No IMU detected"));
 }
 
 bool initImu() {
@@ -387,29 +411,32 @@ void setup() {
     showImuDashboard();
     Serial.println(F("IMU OK — tap: cycle screens | double-tap: axis map | hold: 3D view"));
   } else {
-    drawErrorScreen();
-    Serial.println(F("IMU begin() failed — check wiring"));
+    activeScreen = Screen::WiiI2c;
+    showWiiI2cView();
+    Serial.println(F("No IMU — tap: IMU view / Wii I2C | Wii I2C active"));
   }
 }
 
 void loop() {
-  if (!imuOk) {
-    delay(1000);
-    return;
-  }
-
-  readImu();
-  orientationTracker.updateGyro(gyro.xData, gyro.yData, gyro.zData);
-  gravityReference.updateAccel(accel.xData, accel.yData, accel.zData);
   pollScreenButton();
 
-  if (activeScreen == Screen::ImuDashboard) {
-    pushGyroSample();
-    drawGyroGraph();
-    drawReadings();
+  if (imuOk) {
+    readImu();
+    orientationTracker.updateGyro(gyro.xData, gyro.yData, gyro.zData);
+    gravityReference.updateAccel(accel.xData, accel.yData, accel.zData);
+    // Feed IMU gyro into MotionPlus register map (Z=yaw, Y=roll, X=pitch — tune later).
+    wii_i2c::updateMotionPlusFromGyro(gyro.zData, gyro.yData, gyro.xData);
+  }
 
-    Serial.printf("A  X:%8.1f  Y:%8.1f  Z:%8.1f  |  G  X:%8.1f  Y:%8.1f  Z:%8.1f\n",
-                  accel.xData, accel.yData, accel.zData, gyro.xData, gyro.yData, gyro.zData);
+  if (activeScreen == Screen::ImuDashboard) {
+    if (imuOk) {
+      pushGyroSample();
+      drawGyroGraph();
+      drawReadings();
+
+      Serial.printf("A  X:%8.1f  Y:%8.1f  Z:%8.1f  |  G  X:%8.1f  Y:%8.1f  Z:%8.1f\n",
+                    accel.xData, accel.yData, accel.zData, gyro.xData, gyro.yData, gyro.zData);
+    }
     delay(kRefreshMs);
   } else if (activeScreen == Screen::Prism3D) {
     showPrismView();

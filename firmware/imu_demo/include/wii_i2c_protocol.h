@@ -26,11 +26,29 @@ struct DecodeInfo {
   bool has_mp = false;
 };
 
+// Sticky init milestones — latched once seen (survives fast serial scroll).
+struct InitProgress {
+  bool init_f0;
+  bool init_fb;
+  bool id_read;
+  bool activated;
+  bool bank_a4;
+  bool live_polling;
+  uint32_t init_f0_count;
+  uint32_t id_read_count;
+  uint8_t last_fmt_byte;
+  char last_id_label[20];
+};
+
 void protocolBegin();
 void protocolEnd();
 
 void onMasterWrite(const uint8_t* data, uint8_t len);
 void onMasterReadRequest(uint8_t* out, uint8_t max_len, uint8_t& out_len);
+
+void updateMotionPlusFromGyro(float yaw_mdps, float roll_mdps, float pitch_mdps);
+void getInitProgress(InitProgress& out);
+void getLastMotionPlusReport(uint8_t out[6]);
 
 void getCounts(uint32_t& writes, uint32_t& reads);
 RegBank activeBank();

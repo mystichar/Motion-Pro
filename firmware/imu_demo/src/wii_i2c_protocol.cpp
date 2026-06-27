@@ -23,6 +23,95 @@ uint8_t gLastReadLen = 0;
 uint8_t gLastWriteReported = 0;
 uint8_t gLastReadReported = 0;
 
+InitProgress gInitProgress{};
+uint8_t gLastMpReport[kLiveReportLen]{};
+
+void markInitF0() {
+  gInitProgress.init_f0 = true;
+  gInitProgress.init_f0_count++;
+}
+
+void markInitFb() {
+  gInitProgress.init_fb = true;
+}
+
+void markIdRead(const uint8_t* id6) {
+  gInitProgress.id_read = true;
+  gInitProgress.id_read_count++;
+  strncpy(gInitProgress.last_id_label, idLabelFor(id6), sizeof(gInitProgress.last_id_label) - 1);
+  gInitProgress.last_id_label[sizeof(gInitProgress.last_id_label) - 1] = '\0';
+}
+
+void markActivated(uint8_t fmt) {
+  gInitProgress.activated = true;
+  gInitProgress.last_fmt_byte = fmt;
+}
+
+void markBankA4() {
+  gInitProgress.bank_a4 = true;
+}
+
+void markLivePolling() {
+  gInitProgress.live_polling = true;
+}
+
+// Wiimote writes are not always parsed as offset+payload; scan raw bytes too.
+void scanWriteMilestones(const uint8_t* data, uint8_t len) {
+  for (uint8_t i = 0; i + 1 < len; ++i) {
+    if (data[i] == kRegInitOff && data[i + 1] == kInitDisableEncryption) {
+      markInitF0();
+    }
+    if (data[i] == kRegInitDoneOff && data[i + 1] == kInitCompleteByte) {
+      markInitFb();
+    }
+    if (data[i] == kRegFormatOff) {
+      const uint8_t mode = data[i + 1];
+      if (mode == kMpActivateOnly || mode == kMpActivateNunchukPassthrough ||
+          mode == kMpActivateClassicPassthrough) {
+        markActivated(mode);
+      }
+    }
+  }
+  if (len == 1 && data[0] == 0x37) {
+    markLivePolling();
+  }
+}
+
+int16_t clampMp14(int32_t v) {
+  if (v > 8191) {
+    return 8191;
+  }
+  if (v < -8192) {
+    return -8192;
+  }
+  return (int16_t)v;
+}
+
+int16_t gyroToMpRaw(float mdps) {
+  return clampMp14((int32_t)(mdps / 50.0f));
+}
+
+void packMotionPlusBytes(int16_t yaw, int16_t roll, int16_t pitch, bool slow, uint8_t* b) {
+  const uint16_t uy = (uint16_t)yaw;
+  const uint16_t ur = (uint16_t)roll;
+  const uint16_t up = (uint16_t)pitch;
+  b[0] = (uint8_t)(uy & 0xFF);
+  b[1] = (uint8_t)(ur & 0xFF);
+  b[2] = (uint8_t)(up & 0xFF);
+  b[3] = (uint8_t)(((uy >> 6) & 0xFC) | (slow ? 0x03 : 0x00));
+  b[4] = (uint8_t)(((ur >> 6) & 0xFC) | (slow ? 0x02 : 0x00));
+  b[5] = (uint8_t)(((up >> 6) & 0xFC) | 0x02);
+}
+
+void writeLiveReportEverywhere(const uint8_t report[kLiveReportLen]) {
+  memcpy(&gRegA6[kRegLiveDataOff], report, kLiveReportLen);
+  memcpy(&gRegA4[kRegLiveDataOff], report, kLiveReportLen);
+  // Wiimote on this prototype polls 0x37/0x3D pre-activation (A60000).
+  memcpy(&gRegA6[0x37], report, kLiveReportLen);
+  memcpy(&gRegA6[0x3D], report, kLiveReportLen);
+  memcpy(gLastMpReport, report, kLiveReportLen);
+}
+
 uint8_t* bankRegs(RegBank bank) {
   return bank == RegBank::A60000 ? gRegA6 : gRegA4;
 }
@@ -35,7 +124,8 @@ void seedRegisters() {
 }
 
 void activateMotionPlus(uint8_t mode) {
-  (void)mode;
+  markActivated(mode);
+  markBankA4();
   memcpy(&gRegA4[kRegIdOff], kIdMpActive, kIdLen);
   gBank = RegBank::A40000;
   gReadPtr = kRegLiveDataOff;
@@ -61,9 +151,13 @@ void handleRegisterWrite(RegBank bank, uint16_t offset, const uint8_t* data, uin
   }
 
   if (offset == kRegInitOff && len >= 1 && data[0] == kInitDisableEncryption) {
+    markInitF0();
     if (bank == RegBank::A40000) {
       memcpy(&gRegA4[kRegIdOff], kIdMpInactiveA4, kIdLen);
     }
+  }
+  if (offset == kRegInitDoneOff && len >= 1) {
+    markInitFb();
   }
 }
 
@@ -89,6 +183,8 @@ void protocolBegin() {
   gReadCount = 0;
   gLastWriteLen = 0;
   gLastReadLen = 0;
+  // Init milestones are sticky for the power-on session — do not clear here.
+  memset(gLastMpReport, 0, sizeof(gLastMpReport));
 }
 
 void protocolEnd() {}
@@ -171,6 +267,8 @@ void onMasterWrite(const uint8_t* data, uint8_t len) {
   gLastWriteLen = len > sizeof(gLastWrite) ? sizeof(gLastWrite) : len;
   memcpy(gLastWrite, data, gLastWriteLen);
 
+  scanWriteMilestones(data, len);
+
   if (len == 0) {
     return;
   }
@@ -179,6 +277,9 @@ void onMasterWrite(const uint8_t* data, uint8_t len) {
   const uint16_t offset = parseOffset(data, len, payload_start);
   if (payload_start >= len) {
     gReadPtr = offset;
+    if (offset == 0x37 || offset == kRegLiveDataOff) {
+      markLivePolling();
+    }
     return;
   }
 
@@ -191,6 +292,7 @@ void onMasterWrite(const uint8_t* data, uint8_t len) {
 void onMasterReadRequest(uint8_t* out, uint8_t max_len, uint8_t& out_len) {
   gReadCount++;
   gLastActivityMs = millis();
+  const uint16_t ptr_at_start = gReadPtr;
   uint8_t* regs = bankRegs(gBank);
   out_len = 0;
   while (out_len < max_len && out_len < kLiveReportLen && (gReadPtr + out_len) < kRegBlockSize) {
@@ -200,10 +302,40 @@ void onMasterReadRequest(uint8_t* out, uint8_t max_len, uint8_t& out_len) {
     memcpy(out, &regs[kRegLiveDataOff], kLiveReportLen);
     out_len = kLiveReportLen;
   }
+  if (ptr_at_start == kRegIdOff && out_len >= kIdLen) {
+    markIdRead(out);
+  }
+  if (ptr_at_start == 0x37 || ptr_at_start == kRegLiveDataOff) {
+    if (out_len >= kLiveReportLen && (out[5] & 0x02)) {
+      markLivePolling();
+    }
+  }
   gLastReadLen = out_len > sizeof(gLastRead) ? sizeof(gLastRead) : out_len;
   gLastReadReported = out_len;
   memcpy(gLastRead, out, gLastReadLen);
   gReadPtr += out_len;
+}
+
+void updateMotionPlusFromGyro(float yaw_mdps, float roll_mdps, float pitch_mdps) {
+  const bool slow =
+      (fabsf(yaw_mdps) + fabsf(roll_mdps) + fabsf(pitch_mdps)) < 800.0f;
+  const int16_t yaw = gyroToMpRaw(yaw_mdps);
+  const int16_t roll = gyroToMpRaw(roll_mdps);
+  const int16_t pitch = gyroToMpRaw(pitch_mdps);
+  uint8_t report[kLiveReportLen]{};
+  packMotionPlusBytes(yaw, roll, pitch, slow, report);
+  writeLiveReportEverywhere(report);
+}
+
+void getInitProgress(InitProgress& out) {
+  out = gInitProgress;
+  if (gBank == RegBank::A40000) {
+    out.bank_a4 = true;
+  }
+}
+
+void getLastMotionPlusReport(uint8_t out[kLiveReportLen]) {
+  memcpy(out, gLastMpReport, kLiveReportLen);
 }
 
 void logStatusSerial() {
