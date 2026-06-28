@@ -2,4 +2,5 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 pydantic>=2.0.0
 hidapi>=0.14.0; platform_system == "Windows"
+winsdk>=1.0.0b10; platform_system == "Windows"
 pybluez @ git+https://github.com/pybluez/pybluez.git#egg=pybluez; platform_system == "Linux"

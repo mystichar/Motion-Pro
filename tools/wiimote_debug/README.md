@@ -29,12 +29,21 @@ Open http://localhost:5173
 
 Use **Mock** to verify the UI without hardware.
 
+### Standalone Nintendo scan (prints MAC to terminal)
+
+```powershell
+cd tools/wiimote_debug/backend
+python -m app.wiimote.bt_scan
+```
+
+Or click **Scan** in the UI — the backend logs the same `name<TAB>MAC` lines to its console.
+
 ## Connecting a real remote
 
 ### Linux (recommended — full raw reports)
 
 1. Pair the remote: hold **1+2**, add device in Bluetooth settings (PIN empty if prompted).
-2. Click **Scan** — you should see `Nintendo RVL-CNT-01` or `-TR`.
+2. Click **Scan** (runs ~20s) — hold **1+2** so unpaired remotes appear as `Nintendo RVL-CNT-01` or `-TR`.
 3. Click **Connect**.
 
 Uses direct **L2CAP** (control port 17, data port 19) and report mode `0x31` (accelerometer).
@@ -45,7 +54,7 @@ Requires: BlueZ, `python3-dev`, and PyBluez (listed in `backend/requirements.txt
 
 Windows does not expose Wii Remote **L2CAP** to user-space Python. Options:
 
-1. **[HID Wiimote driver](https://www.julianloehr.de/educational-work/hid-wiimote/)** — pair the remote, then **Scan** for a Nintendo HID device and connect.
+1. **[HID Wiimote driver](https://www.julianloehr.de/educational-work/hid-wiimote/)** — pair the remote, then **Scan** (~20s, hold 1+2) for Nintendo devices.
 2. **Mayflash DolphinBar** — remote appears as USB HID; scan and connect via HID path.
 3. **Mock mode** — UI development only.
 

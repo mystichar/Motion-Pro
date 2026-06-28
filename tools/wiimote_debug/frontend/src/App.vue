@@ -6,6 +6,7 @@ const platform = ref(null);
 const devices = ref([]);
 const address = ref("");
 const busy = ref(false);
+const scanHint = ref("");
 const wsError = ref("");
 let socket = null;
 let reconnectTimer = null;
@@ -50,11 +51,13 @@ async function refreshStatus() {
 
 async function scanDevices() {
   busy.value = true;
+  scanHint.value = "Scanning Bluetooth (~20s). Hold 1+2 on the Wii Remote…";
   try {
-    const data = await api("/api/devices");
+    const data = await api("/api/devices?timeout=20");
     devices.value = data.devices ?? [];
   } finally {
     busy.value = false;
+    scanHint.value = "";
   }
 }
 
@@ -137,14 +140,19 @@ onUnmounted(() => {
         <button :disabled="busy" @click="scanDevices()">Scan</button>
         <button :disabled="busy || !connected" @click="disconnect()">Disconnect</button>
       </div>
+      <p v-if="scanHint" class="hint">{{ scanHint }}</p>
       <p v-if="wsError" class="error">{{ wsError }}</p>
       <ul v-if="devices.length" class="device-list">
-        <li v-for="d in devices" :key="d.address">
-          {{ d.name }} — <code>{{ d.address }}</code>
-          <span v-if="d.via"> ({{ d.via }})</span>
+        <li v-for="d in devices" :key="d.address + d.via">
+          <strong v-if="d.name?.startsWith('Nintendo')">{{ d.name }}</strong>
+          <span v-else>{{ d.name }}</span>
+          — MAC <code>{{ d.address }}</code>
+          <span v-if="d.via" class="hint"> ({{ d.via }})</span>
         </li>
       </ul>
-      <p v-else class="hint">No remotes found. Hold 1+2 while pairing, then scan again.</p>
+      <p v-else class="hint">
+        No Nintendo devices found. Hold 1+2 on the remote, pair in Bluetooth settings, then Scan.
+      </p>
       <p v-if="platform" class="hint">
         Platform: {{ platform.os }} · L2CAP {{ platform.l2cap ? "yes" : "no" }} · HID
         {{ platform.hid ? "yes" : "no" }}

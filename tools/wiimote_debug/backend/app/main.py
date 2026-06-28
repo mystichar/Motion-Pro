@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .wiimote import bt_scan
 from .wiimote.manager import manager
 
 
@@ -42,8 +43,13 @@ async def get_status() -> dict:
 
 
 @app.get("/api/devices")
-async def list_devices() -> dict:
-    return {"devices": manager.discover()}
+async def list_devices(timeout: float = bt_scan.DEFAULT_SCAN_TIMEOUT_S) -> dict:
+    seconds = max(5.0, min(timeout, 60.0))
+    devices = await asyncio.to_thread(manager.discover, timeout_s=seconds)
+    return {
+        "devices": devices,
+        "scan_seconds": seconds,
+    }
 
 
 @app.post("/api/connect")

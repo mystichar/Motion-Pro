@@ -7,7 +7,7 @@ import sys
 import threading
 from typing import Any, Callable
 
-from . import hid_backend, l2cap, mock
+from . import bt_scan, hid_backend, l2cap, mock
 from .protocol import WiimoteState
 
 Connection = l2cap.L2capWiimote | hid_backend.HidWiimote | mock.MockWiimote
@@ -37,14 +37,23 @@ class WiimoteManager:
             }
             return {"state": self._state.to_dict(), "platform": platform}
 
-    def discover(self) -> list[dict[str, str]]:
+    def discover(self, timeout_s: float | None = None) -> list[dict[str, str]]:
+        scan_seconds = timeout_s if timeout_s is not None else bt_scan.DEFAULT_SCAN_TIMEOUT_S
         devices: list[dict[str, str]] = []
+        nintendo = bt_scan.discover_nintendo_bluetooth(timeout_s=scan_seconds)
+        bt_scan.print_nintendo_devices(nintendo, timeout_s=scan_seconds)
+        devices.extend(nintendo)
         if l2cap._platform_supports_l2cap():
-            devices.extend(l2cap.discover_devices())
+            for entry in l2cap.discover_devices():
+                if entry.get("name", "").startswith(bt_scan.NINTENDO_PREFIX):
+                    devices.append({**entry, "via": entry.get("via", "l2cap")})
         if hid_backend.hid_available():
             for entry in hid_backend.discover_devices():
-                devices.append({"address": entry["address"], "name": entry["name"], "via": "hid"})
-        return devices
+                name = entry.get("name", "")
+                if not name.startswith(bt_scan.NINTENDO_PREFIX):
+                    continue
+                devices.append({"address": entry["address"], "name": name, "via": "hid"})
+        return bt_scan.dedupe_devices(devices)
 
     def connect(self, address: str | None = None, use_mock: bool = False) -> dict[str, Any]:
         with self._lock:
